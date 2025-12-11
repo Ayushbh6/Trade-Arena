@@ -1,0 +1,42 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+*.pyc
+__pycache__/
+
+# Environment Variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/
+docs/
+
+# MacOS
+.DS_Store
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Trading Data
+*.csv
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# TWS Settings (if any get saved locally)
+tws_settings/
+
+
+##Specific
+*.md
+!README.md
+
