@@ -15,3 +15,4 @@ from src.agents.schemas import (  # noqa: F401
     DecisionItem,
 )
 
+from src.agents.manager import ManagerAgent, ManagerConfig  # noqa: F401

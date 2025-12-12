@@ -105,6 +105,64 @@ class BaseTrader:
             "- Use null for unknown optional fields.\n"
         )
 
+    def _build_finalization_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sanitize/condense transcript for schema-only finalization.
+
+        Some providers/models behave unpredictably if we send prior tool-role messages
+        into a later call where tools are not provided. To keep the finalization call
+        reliable, we:
+        - keep the original system prompt
+        - keep the original user prompt content
+        - append tool outputs as plain text (authoritative transcript)
+        - omit tool-role messages and any tool_call metadata
+        """
+        if not messages:
+            raise ValueError("messages cannot be empty")
+
+        system_msg = {"role": "system", "content": messages[0].get("content", "")}
+
+        user_content = ""
+        if len(messages) > 1 and messages[1].get("role") == "user":
+            user_content = messages[1].get("content") or ""
+
+        tool_lines: List[str] = []
+        for m in messages:
+            if m.get("role") != "tool":
+                continue
+            name = m.get("name") or "tool"
+            content = m.get("content") or ""
+            tool_lines.append(f"- {name}: {content}")
+
+        assistant_notes: List[str] = []
+        for m in messages[2:]:
+            if m.get("role") != "assistant":
+                continue
+            if m.get("tool_calls"):
+                continue
+            c = (m.get("content") or "").strip()
+            if c:
+                assistant_notes.append(c)
+
+        final_parts: List[str] = [user_content]
+        if tool_lines:
+            final_parts.append("\nTool results (authoritative):")
+            final_parts.append("\n".join(tool_lines))
+        if assistant_notes:
+            final_parts.append("\nPrior assistant notes (may be incomplete):")
+            final_parts.append("\n\n".join(assistant_notes))
+
+        final_system = {
+            "role": "system",
+            "content": (
+                "FINALIZATION STEP:\n"
+                "- Tools are NOT available in this step.\n"
+                "- Return ONLY the TradeProposal JSON object.\n"
+                "- Do NOT return an array; the top-level value MUST be a JSON object.\n"
+            ),
+        }
+        final_user = {"role": "user", "content": "\n".join([p for p in final_parts if p])}
+        return [system_msg, final_system, final_user]
+
     def __init__(
         self,
         *,
@@ -360,11 +418,13 @@ class BaseTrader:
                 self.last_messages = list(messages)
                 break
 
+        final_messages = self._build_finalization_messages(messages)
+
         # If we get here, tool loop exceeded max turns. Force a final answer.
         # Phase B (finalization): enforce strict TradeProposal schema (no tools).
         def _finalize() -> str:
             final_res = chat_completion_raw(
-                messages=messages,
+                messages=final_messages,
                 model=self.config.model,
                 output_schema=schema,
                 schema_name="TradeProposal",
@@ -376,12 +436,13 @@ class BaseTrader:
 
         def _finalize_json_object_with_schema_hint(err_text: str) -> str:
             schema_hint = json.dumps(schema, ensure_ascii=False)
-            hint_msgs = messages + [
+            hint_msgs = final_messages + [
                 {
                     "role": "system",
                     "content": (
                         "FINAL RESPONSE RETRY (JSON MODE):\n"
                         "Return ONLY a valid JSON object matching this schema. No markdown, no prose.\n"
+                        "The top-level value MUST be a JSON object (start with '{', end with '}'), not an array.\n"
                         f"Schema: {schema_hint}\n"
                         f"Previous error: {err_text}"
                     ),
@@ -412,7 +473,7 @@ class BaseTrader:
                 else:
                     final_content = _finalize_json_object_with_schema_hint(str(last_err or "invalid output"))
 
-                self.last_messages = list(messages) + [
+                self.last_messages = list(final_messages) + [
                     {"role": "assistant", "content": final_content}
                 ]
                 proposal = self._parse_trade_proposal(final_content)
@@ -421,18 +482,7 @@ class BaseTrader:
             except Exception as e:
                 last_err = e
                 if attempt == 0 and self.config.final_retry_on_invalid_json:
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                "Your previous final response was invalid (failed JSON parse or schema validation).\n"
-                                f"Error: {str(e)}\n"
-                                "Retry now. Return ONLY valid JSON that matches TradeProposal schema exactly. "
-                                "No markdown, no prose, no code fences. "
-                                "Also: include a short but specific reasoning summary in top-level 'notes'."
-                            ),
-                        }
-                    )
+                    # Keep the tool transcript stable; retry uses the json_object path with a schema hint.
                     continue
                 break
 

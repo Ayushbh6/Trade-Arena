@@ -44,6 +44,8 @@ class ModelConfig:
     provider: str
     trader_models: Dict[str, str]
     manager_model: str
+    manager_model_fast: str
+    manager_model_thinking: str
 
 
 @dataclass(frozen=True)
@@ -92,11 +94,15 @@ def load_config() -> AppConfig:
             trader_models[f"trader_{i}"] = os.getenv(key, "")
 
     manager_model = os.getenv("LLM_MODEL_MANAGER", "deepseek/deepseek-chat")
+    manager_model_fast = os.getenv("LLM_MODEL_MANAGER_FAST", "") or manager_model
+    manager_model_thinking = os.getenv("LLM_MODEL_MANAGER_THINKING", "") or manager_model
 
     models = ModelConfig(
         provider=provider,
         trader_models=trader_models,
         manager_model=manager_model,
+        manager_model_fast=manager_model_fast,
+        manager_model_thinking=manager_model_thinking,
     )
 
     risk = RiskLimits(
@@ -135,4 +141,3 @@ def load_config() -> AppConfig:
 
 
 __all__ = ["AppConfig", "load_config"]
-

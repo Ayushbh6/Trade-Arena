@@ -126,6 +126,12 @@ class DecisionType(str, Enum):
 class DecisionItem(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
+    agent_id: Optional[str] = Field(
+        None, description="Owning agent_id for the proposal that this decision refers to."
+    )
+    trade_index: Optional[int] = Field(
+        None, ge=0, description="Index into that agent's TradeProposal.trades (if applicable)."
+    )
     symbol: str
     decision: DecisionType
     approved_size_usdt: Optional[float] = Field(
@@ -146,6 +152,9 @@ class ManagerDecision(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     decisions: List[DecisionItem] = Field(default_factory=list)
+    notes: Optional[str] = Field(
+        None, description="Manager reasoning summary for approvals/vetoes/resizes."
+    )
     firm_notes: Optional[str] = None
 
 
@@ -155,4 +164,3 @@ T = TypeVar("T", bound=BaseModel)
 def export_json_schema(model: Type[T]) -> Dict[str, Any]:
     """Export JSON schema for structured output hints."""
     return model.model_json_schema()
-

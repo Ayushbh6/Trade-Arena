@@ -61,15 +61,19 @@ def main() -> None:
         manager_id="manager",
         decisions=[
             DecisionItem(
+                agent_id="tech_trader",
+                trade_index=0,
                 symbol="BTCUSDT",
                 decision=DecisionType.approve,
                 approved_size_usdt=250.0,
                 approved_leverage=2.0,
             )
         ],
+        notes="Approve with conservative sizing; no hard violations.",
     )
     dd = decision.model_dump(mode="json")
     assert dd["decisions"][0]["decision"] == "approve"
+    assert dd["notes"]
 
     schema = export_json_schema(TradeProposal)
     assert schema.get("title") == "TradeProposal"
@@ -83,4 +87,3 @@ if __name__ == "__main__":
         main()
     except Exception:
         sys.exit(1)
-
