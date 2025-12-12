@@ -213,7 +213,6 @@ def test_structured_output(model: str) -> None:
         schema_name="TradeProposal",
         strict_json=True,
         temperature=0.0,
-        max_tokens=400,
     )
 
     obj = json.loads(text)

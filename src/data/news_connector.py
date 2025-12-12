@@ -75,7 +75,7 @@ class TavilyNewsConnector:
         payload: Dict[str, Any] = {
             "api_key": self.config.api_key,
             "query": query,
-            "search_depth": "advanced",
+            "search_depth": "basic",
             "max_results": max_r,
             "topic": "news",
             "days": max(1, int(recency / 24)),

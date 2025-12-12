@@ -1,0 +1,70 @@
+"""News-related read-only tools."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
+
+from ...config import load_config
+from ...data.mongo import jsonify, utc_now
+from ...data.news_connector import TavilyNewsConnector
+from ...data.schemas import NEWS_EVENTS
+from .context import ToolContext
+
+
+async def tavily_search(
+    *,
+    query: str,
+    max_results: int = 8,
+    recency_hours: int = 24,
+    context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    ctx = context or ToolContext()
+    connector = ctx.news_connector
+    if connector is None:
+        cfg = ctx.config or load_config()
+        connector = TavilyNewsConnector.from_app_config(cfg, mongo=ctx.mongo, run_id=ctx.run_id)
+    results = connector.search(query, max_results=max_results, recency_hours=recency_hours)
+    return jsonify({"query": query, "results": results})
+
+
+async def get_recent_news(
+    *,
+    symbols: List[str],
+    lookback_hours: int = 24,
+    max_items: int = 20,
+    context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    ctx = context or ToolContext()
+    if ctx.mongo is None:
+        return {"as_of": utc_now(), "symbols": {s: [] for s in symbols}}
+
+    cutoff = utc_now() - timedelta(hours=lookback_hours)
+    await ctx.mongo.connect()
+    col = ctx.mongo.collection(NEWS_EVENTS)
+    cursor = (
+        col.find({"timestamp": {"$gte": cutoff}, "symbols": {"$in": symbols}})
+        .sort("timestamp", -1)
+        .limit(max_items)
+    )
+    docs = await cursor.to_list(length=max_items)
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {s: [] for s in symbols}
+    for d in docs:
+        syms = d.get("symbols") or []
+        item = {
+            "timestamp": d.get("timestamp"),
+            "title": d.get("title"),
+            "url": d.get("url"),
+            "summary": d.get("summary"),
+            "source": d.get("source", "unknown"),
+        }
+        for s in syms:
+            if s in grouped:
+                grouped[s].append(item)
+
+    return jsonify({"as_of": utc_now(), "symbols": grouped})
+
+
+__all__ = ["tavily_search", "get_recent_news"]
+
