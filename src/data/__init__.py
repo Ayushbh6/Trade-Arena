@@ -1,13 +1,8 @@
-"""Data layer package."""
+"""Data layer package.
 
-from .market_data import MarketDataConfig, MarketDataIngestor
-from .news_connector import NewsConnectorConfig, TavilyNewsConnector
-from .mongo import MongoManager
+Keep this package `__init__` lightweight to avoid import cycles.
+Import concrete modules directly, e.g.:
+  - `from src.data.mongo import MongoManager`
+"""
 
-__all__ = [
-    "MarketDataConfig",
-    "MarketDataIngestor",
-    "NewsConnectorConfig",
-    "TavilyNewsConnector",
-    "MongoManager",
-]
+__all__: list[str] = []
