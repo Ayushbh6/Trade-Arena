@@ -78,17 +78,19 @@ async def main() -> None:
     print("  ", (brief.get("neutral_summary") or "")[:200])
 
     candles = await dispatch["get_candles"](
-        symbols=symbols[:1], timeframes=["1m"], lookback_bars=20
+        symbols=symbols[:1], timeframes=["1m"], lookback_bars=20, detail_level="compact"
     )
     sym0 = symbols[0]
-    assert len(candles["symbols"][sym0]["1m"]) > 0
-    print(f"[OK] get_candles passed for {sym0}. last bar snippet:")
-    print("  ", candles["symbols"][sym0]["1m"][-1])
+    bars = candles["symbols"][sym0]["1m"]["bars"]
+    assert len(bars) > 0
+    assert isinstance(bars[-1], list) and len(bars[-1]) == 6
+    print(f"[OK] get_candles passed for {sym0}. last bar snippet (ohlcv_6):")
+    print("  ", bars[-1])
 
     indicators = await dispatch["get_indicator_pack"](symbols=symbols[:1], timeframes=["1m"])
     assert "rsi_14" in indicators["symbols"][sym0]["1m"]
-    print(f"[OK] get_indicator_pack passed for {sym0} 1m. keys snippet:")
-    ind_keys = list(indicators["symbols"][sym0]["1m"].keys())
+    print(f"[OK] get_indicator_pack passed for {sym0} 1m. keys snippet (compact subset):")
+    ind_keys = list((indicators["symbols"][sym0]["1m"] or {}).keys())
     print("  ", ind_keys[:10])
 
     news = await dispatch["get_recent_news"](symbols=symbols[:1], lookback_hours=24)

@@ -106,10 +106,21 @@ class TechnicalTrader:
         agent_id: str = "tech_trader",
         config: TechnicalTraderConfig,
         tools_context: Optional[ToolContext] = None,
+        allowed_tools: Optional[list[str]] = None,
     ):
         self.agent_id = agent_id
         self.config = config
         self.tools_context = tools_context
+
+        if allowed_tools is None:
+            allowed_tools = [
+                "get_market_brief",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+                "query_memory",
+            ]
 
         self._base = BaseTrader(
             agent_id=self.agent_id,
@@ -119,6 +130,7 @@ class TechnicalTrader:
                 temperature=config.temperature,
                 max_tool_turns=config.max_tool_turns,
                 max_tool_calls=config.max_tool_calls,
+                allowed_tools=allowed_tools,
             ),
             tools_context=tools_context,
         )

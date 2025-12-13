@@ -181,7 +181,9 @@ class MarketDataIngestor:
     async def fetch_and_store_snapshot(self) -> Dict[str, Any]:
         snapshot = self.build_snapshot()
         if self.mongo is not None:
-            await self.mongo.insert_one(MARKET_SNAPSHOTS, snapshot)
+            inserted_id = await self.mongo.insert_one(MARKET_SNAPSHOTS, snapshot)
+            # Motor returns inserted_id separately; attach so downstream audit/tests can reference it.
+            snapshot["_id"] = inserted_id
             await self.mongo.log_audit_event(
                 "market_snapshot_fetched",
                 {"symbols": snapshot["symbols"], "latency_s": snapshot.get("latency_s")},
@@ -191,4 +193,3 @@ class MarketDataIngestor:
 
 
 __all__ = ["MarketDataIngestor", "MarketDataConfig"]
-

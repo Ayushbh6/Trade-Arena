@@ -109,7 +109,7 @@ def load_config() -> AppConfig:
         firm_max_total_notional_mult=_env_float("FIRM_MAX_TOTAL_NOTIONAL_MULT", 2.0),
         firm_max_leverage_per_position=_env_float("FIRM_MAX_LEVERAGE_PER_POSITION", 3.0),
         firm_daily_stop_pct=_env_float("FIRM_DAILY_STOP_PCT", 0.05),
-        agent_budget_notional_usd=_env_float("AGENT_BUDGET_NOTIONAL_USD", 1000.0),
+        agent_budget_notional_usd=_env_float("AGENT_BUDGET_NOTIONAL_USD", 10000.0),
         agent_max_risk_pct_per_trade=_env_float("AGENT_MAX_RISK_PCT_PER_TRADE", 0.01),
         agent_cooldown_cycles_after_stop=_env_int("AGENT_COOLDOWN_CYCLES_AFTER_STOP", 2),
         vol_spike_size_reduction_mult=_env_float("VOL_SPIKE_SIZE_REDUCTION_MULT", 0.5),

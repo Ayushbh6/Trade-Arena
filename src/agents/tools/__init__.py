@@ -53,9 +53,13 @@ def _bind_context(fn: ToolFn, ctx: ToolContext) -> ToolFn:
     return _wrap
 
 
-def build_tool_specs(context: Optional[ToolContext] = None) -> List[ToolSpec]:
+def build_tool_specs(
+    context: Optional[ToolContext] = None,
+    *,
+    allowed_tools: Optional[List[str]] = None,
+) -> List[ToolSpec]:
     ctx = context or ToolContext()
-    return [
+    specs = [
         ToolSpec(
             name="get_market_brief",
             description="Get a compact, strategy-neutral Market Brief for symbols.",
@@ -64,6 +68,12 @@ def build_tool_specs(context: Optional[ToolContext] = None) -> List[ToolSpec]:
                 "properties": {
                     "symbols": {"type": "array", "items": {"type": "string"}},
                     "lookback_minutes": {"type": "integer", "minimum": 1, "default": 240},
+                    "detail_level": {
+                        "type": "string",
+                        "default": "compact",
+                        "description": "compact returns a smaller brief suitable for LLM context; full returns richer payload.",
+                        "enum": ["compact", "full"],
+                    },
                     "allow_live_fetch": {
                         "type": "boolean",
                         "default": False,
@@ -82,7 +92,13 @@ def build_tool_specs(context: Optional[ToolContext] = None) -> List[ToolSpec]:
                 "properties": {
                     "symbols": {"type": "array", "items": {"type": "string"}},
                     "timeframes": {"type": "array", "items": {"type": "string"}},
-                    "lookback_bars": {"type": "integer", "minimum": 1, "default": 180},
+                    "lookback_bars": {"type": "integer", "minimum": 1, "default": 60},
+                    "detail_level": {
+                        "type": "string",
+                        "default": "compact",
+                        "description": "compact returns [t_ms,o,h,l,c,v] arrays + stats; full returns candle dicts.",
+                        "enum": ["compact", "full"],
+                    },
                 },
                 "required": ["symbols", "timeframes"],
             },
@@ -96,6 +112,11 @@ def build_tool_specs(context: Optional[ToolContext] = None) -> List[ToolSpec]:
                 "properties": {
                     "symbols": {"type": "array", "items": {"type": "string"}},
                     "timeframes": {"type": "array", "items": {"type": "string"}},
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional allowlist of indicator keys to return (to keep payload small).",
+                    },
                 },
                 "required": ["symbols", "timeframes"],
             },
@@ -169,13 +190,27 @@ def build_tool_specs(context: Optional[ToolContext] = None) -> List[ToolSpec]:
         ),
     ]
 
+    if allowed_tools is None:
+        return specs
 
-def build_openrouter_tools(context: Optional[ToolContext] = None) -> List[Dict[str, Any]]:
-    return [spec.openrouter_def() for spec in build_tool_specs(context)]
+    allow = set(allowed_tools)
+    return [s for s in specs if s.name in allow]
 
 
-def build_tool_dispatch(context: Optional[ToolContext] = None) -> Dict[str, ToolFn]:
-    return {spec.name: spec.func for spec in build_tool_specs(context)}
+def build_openrouter_tools(
+    context: Optional[ToolContext] = None,
+    *,
+    allowed_tools: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    return [spec.openrouter_def() for spec in build_tool_specs(context, allowed_tools=allowed_tools)]
+
+
+def build_tool_dispatch(
+    context: Optional[ToolContext] = None,
+    *,
+    allowed_tools: Optional[List[str]] = None,
+) -> Dict[str, ToolFn]:
+    return {spec.name: spec.func for spec in build_tool_specs(context, allowed_tools=allowed_tools)}
 
 
 __all__ = [
@@ -185,4 +220,3 @@ __all__ = [
     "build_openrouter_tools",
     "build_tool_dispatch",
 ]
-

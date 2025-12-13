@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from Utils.openrouter import chat_completion_raw
+from src.data.mongo import jsonify
 from src.agents.schemas import (
     DecisionType,
     OrderType,
@@ -21,8 +22,17 @@ from src.agents.schemas import (
     TradeProposal,
     export_json_schema,
 )
-from src.agents.tools import ToolContext, build_openrouter_tools, build_tool_dispatch
-from src.data.mongo import jsonify
+from src.agents.tools import (
+    ToolContext,
+    build_openrouter_tools,
+    build_tool_dispatch,
+    build_tool_specs,
+ )
+
+try:  # pragma: no cover
+    import tiktoken  # type: ignore
+except Exception:  # pragma: no cover
+    tiktoken = None
 
 
 @dataclass
@@ -33,10 +43,99 @@ class BaseTraderConfig:
     max_tool_calls: int = 6
     tool_choice: str = "auto"
     final_retry_on_invalid_json: bool = True
+    allowed_tools: Optional[List[str]] = None
+    # Per-tool-call output budget to prevent provider context overflow.
+    # This is an approximation (cl100k_base) but works as a safety belt.
+    max_tool_output_tokens: int = 8000
 
 
 class BaseTrader:
     """Common REACT loop for trader agents."""
+
+    def _count_tokens(self, text: str) -> int:
+        if not text:
+            return 0
+        if tiktoken is None:
+            # Fallback heuristic: ~4 chars/token for typical English/JSON.
+            return max(1, len(text) // 4)
+        try:
+            enc = tiktoken.get_encoding("cl100k_base")
+            return len(enc.encode(text))
+        except Exception:
+            return max(1, len(text) // 4)
+
+    def _shrink_json_payload(self, obj: Any, *, max_tokens: int) -> Tuple[Any, bool]:
+        """Deterministically shrink a JSON-serializable object until under token budget.
+
+        Strategy:
+        - Prefer trimming list lengths (keep most recent tail items).
+        - Iteratively halve the max list length until fit.
+        - If still too large, replace oversized lists with an omitted marker.
+        """
+
+        def _trim_lists(v: Any, *, max_list_len: int) -> Any:
+            if isinstance(v, list):
+                if len(v) <= max_list_len:
+                    return [_trim_lists(x, max_list_len=max_list_len) for x in v]
+                # Keep the tail (most recent bars/items) by default.
+                trimmed = v[-max_list_len:]
+                return [_trim_lists(x, max_list_len=max_list_len) for x in trimmed]
+            if isinstance(v, dict):
+                return {k: _trim_lists(val, max_list_len=max_list_len) for k, val in v.items()}
+            return v
+
+        payload = jsonify(obj)
+        raw = json.dumps(payload, ensure_ascii=False, default=str)
+        if self._count_tokens(raw) <= max_tokens:
+            return payload, False
+
+        truncated = False
+        max_list_len = 200
+        for _ in range(8):
+            truncated_payload = _trim_lists(payload, max_list_len=max_list_len)
+            raw2 = json.dumps(truncated_payload, ensure_ascii=False, default=str)
+            if self._count_tokens(raw2) <= max_tokens:
+                return truncated_payload, True
+            truncated = True
+            max_list_len = max(5, max_list_len // 2)
+
+        # Last resort: aggressively omit all long lists.
+        def _omit_big_lists(v: Any) -> Any:
+            if isinstance(v, list) and len(v) > 5:
+                return {
+                    "_omitted": True,
+                    "reason": "payload_too_large",
+                    "kept_tail": v[-5:],
+                    "original_len": len(v),
+                }
+            if isinstance(v, list):
+                return [_omit_big_lists(x) for x in v]
+            if isinstance(v, dict):
+                return {k: _omit_big_lists(val) for k, val in v.items()}
+            return v
+
+        final_payload = _omit_big_lists(payload)
+        return final_payload, True or truncated
+
+    def _tool_signatures_text(self) -> str:
+        specs = build_tool_specs(
+            self.tools_context,
+            allowed_tools=self.config.allowed_tools,
+        )
+        if not specs:
+            return "Tools available: none."
+
+        lines: List[str] = ["Tools available (JSON in/out):"]
+        for s in specs:
+            params = s.parameters or {}
+            props = (params.get("properties") or {}) if isinstance(params, dict) else {}
+            required = (params.get("required") or []) if isinstance(params, dict) else []
+            req_txt = f"required={required}" if required else "required=[]"
+            prop_keys = list(props.keys()) if isinstance(props, dict) else []
+            lines.append(f"- {s.name}: {s.description}")
+            lines.append(f"  input: object with keys={prop_keys}; {req_txt}")
+            lines.append("  output: JSON object (tool-specific payload)")
+        return "\n".join(lines)
 
     def _strip_code_fences(self, text: str) -> str:
         s = text.strip()
@@ -176,8 +275,12 @@ class BaseTrader:
         self.config = config
         self.tools_context = tools_context or ToolContext()
 
-        self._tool_defs = build_openrouter_tools(self.tools_context)
-        self._tool_dispatch = build_tool_dispatch(self.tools_context)
+        self._tool_defs = build_openrouter_tools(
+            self.tools_context, allowed_tools=self.config.allowed_tools
+        )
+        self._tool_dispatch = build_tool_dispatch(
+            self.tools_context, allowed_tools=self.config.allowed_tools
+        )
 
         # Trace/debug info from last decide() call
         self.last_messages: List[Dict[str, Any]] = []
@@ -217,7 +320,11 @@ class BaseTrader:
                 "Tool policy:\n"
                 "- Tools are authoritative. Do not fabricate data that a tool could provide.\n"
                 "- You may call multiple tools sequentially. If instructed to call specific tools, comply.\n"
+                f"- You can make up to {self.config.max_tool_calls} tool calls total across up to "
+                f"{self.config.max_tool_turns} tool turns. Use this budget to gather facts before deciding.\n"
                 "- Do not call any tool not in the registry.\n\n"
+                + self._tool_signatures_text()
+                + "\n\n"
             "Output contract:\n"
             "- Final answer MUST be ONLY valid JSON matching TradeProposal schema.\n"
             "- No extra keys, no prose outside JSON.\n"
@@ -393,13 +500,29 @@ class BaseTrader:
                     except Exception as e:
                         tool_out = {"error": str(e)}
 
+                payload, truncated = self._shrink_json_payload(
+                    tool_out, max_tokens=self.config.max_tool_output_tokens
+                )
+                if truncated:
+                    payload = {
+                        "truncated": True,
+                        "note": (
+                            "Tool output was truncated to stay within context limits. "
+                            "Next time, make more focused tool calls (fewer symbols/timeframes, "
+                            "smaller lookback_bars/lookback_minutes, or request a compact detail level)."
+                        ),
+                        "data": payload,
+                    }
+
                 messages.append(
                     {
                         "role": "tool",
                         "name": fn_name,
                         "tool_call_id": tc["id"],
                         "content": json.dumps(
-                            jsonify(tool_out), ensure_ascii=False, default=str
+                            jsonify(payload),
+                            ensure_ascii=False,
+                            default=str,
                         ),
                     }
                 )

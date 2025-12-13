@@ -75,11 +75,12 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
     ),
     TRADE_PROPOSALS: CollectionSpec(
         name=TRADE_PROPOSALS,
-        required_keys=("run_id", "timestamp", "agent_id", "symbol", "action"),
+        required_keys=("run_id", "timestamp", "agent_id", "trades"),
         indexes=(
             (("run_id", ASCENDING), ("timestamp", DESCENDING)),
             (("agent_id", ASCENDING), ("timestamp", DESCENDING)),
-            (("symbol", ASCENDING), ("timestamp", DESCENDING)),
+            (("cycle_id", ASCENDING), ("timestamp", DESCENDING)),
+            (("trades.symbol", ASCENDING), ("timestamp", DESCENDING)),
         ),
     ),
     MANAGER_DECISIONS: CollectionSpec(
@@ -87,6 +88,7 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
         required_keys=("run_id", "timestamp"),
         indexes=(
             (("run_id", ASCENDING), ("timestamp", DESCENDING)),
+            (("cycle_id", ASCENDING), ("timestamp", DESCENDING)),
         ),
     ),
     ORDERS: CollectionSpec(
@@ -138,4 +140,3 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
 
 def get_collection_spec(name: str) -> Optional[CollectionSpec]:
     return COLLECTION_SPECS.get(name)
-

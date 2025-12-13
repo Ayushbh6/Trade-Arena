@@ -1,0 +1,521 @@
+"""Single-cycle orchestrator (Phase 5.1).
+
+This module runs one end-to-end cycle:
+  snapshot -> market brief -> traders (parallel) -> risk -> manager -> plan -> execute -> sync positions
+
+Notes:
+- Traders receive a thin brief and are expected to use tools.
+- Execution is testnet-only (safety belt enforced by config/binance client).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from typing import Any, Dict, List, Optional, Tuple
+
+from src.agents.manager import ManagerAgent, ManagerConfig
+from src.agents.schemas import ManagerDecision, TradeProposal, DecisionType
+from src.agents.technical_trader import TechnicalTrader, TechnicalTraderConfig
+from src.agents.tools import ToolContext
+from src.agents.tools.market_tools import get_firm_state
+from src.config import AppConfig, load_config
+from src.data.audit import AuditContext, AuditManager
+from src.data.market_data import MarketDataIngestor
+from src.data.mongo import MongoManager, jsonify
+from src.data.schemas import MANAGER_DECISIONS, TRADE_PROPOSALS
+from src.execution.binance_client import BinanceFuturesClient
+from src.execution.executor import ExecutorConfig, OrderExecutor
+from src.execution.planner import OrderPlanError, build_order_plan
+from src.execution.position_tracker import PositionTracker
+from src.execution.schemas import ExecutionStatus
+from src.features.market_state import MarketStateBuilder
+from src.risk.validator import validate_proposal
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _default_run_id() -> str:
+    return _utc_now().strftime("run_%Y%m%d_%H%M%S")
+
+
+def _default_cycle_id() -> str:
+    return _utc_now().strftime("cycle_%Y%m%d_%H%M%S")
+
+
+def _thin_market_brief(full: Dict[str, Any], symbols: List[str]) -> Dict[str, Any]:
+    per_symbol = full.get("per_symbol") or {}
+    thin_per: Dict[str, Any] = {}
+    for s in symbols:
+        sym = per_symbol.get(s) or {}
+        thin_per[s] = {
+            "last_price": sym.get("last_price"),
+            "spread": sym.get("spread"),
+            "vol_regime": sym.get("regime", {}).get("volatility"),
+            "trend_regime": sym.get("regime", {}).get("trend"),
+        }
+
+    return {
+        "timestamp": full.get("timestamp"),
+        "symbols": symbols,
+        "neutral_summary": full.get("neutral_summary"),
+        "per_symbol": thin_per,
+        "note": "Thin brief. Use tools (get_market_brief/get_candles/get_indicator_pack/query_memory) to fetch details.",
+    }
+
+
+def _summarize_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract a small summary of tool outputs (errors/truncation only)."""
+    out: List[Dict[str, Any]] = []
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        name = m.get("name")
+        content = m.get("content") or ""
+        try:
+            obj = json.loads(content)
+        except Exception:
+            continue
+
+        if isinstance(obj, dict) and obj.get("error"):
+            out.append({"tool": name, "status": "error", "error": obj.get("error")})
+            continue
+
+        if isinstance(obj, dict) and obj.get("truncated") is True:
+            note = obj.get("note")
+            out.append({"tool": name, "status": "truncated", "note": note})
+            continue
+    return out
+
+
+def _execution_status_from_report(report: Any) -> str:
+    """Summarize an ExecutionReport into a simple status string."""
+    try:
+        results = list(getattr(report, "results", []) or [])
+    except Exception:
+        return "unknown"
+    if not results:
+        return "skipped"
+    statuses = [r.status for r in results if getattr(r, "status", None) is not None]
+    if any(s == ExecutionStatus.failed for s in statuses):
+        return "failed"
+    if any(s in {ExecutionStatus.placed, ExecutionStatus.already_exists} for s in statuses):
+        return "success"
+    return "skipped"
+
+
+@dataclass(frozen=True)
+class OrchestratorConfig:
+    trader_timeout_s: float = 120.0
+    manager_timeout_s: float = 120.0
+    execute_testnet: bool = True
+    extra_trader_instructions: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CycleResult:
+    run_id: str
+    cycle_id: str
+    snapshot_id: Optional[str]
+    proposals: List[TradeProposal]
+    manager_decision: Optional[ManagerDecision]
+    order_plan_intents: int
+    execution_status: str
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        *,
+        mongo: MongoManager,
+        config: Optional[AppConfig] = None,
+        orchestrator_config: Optional[OrchestratorConfig] = None,
+    ):
+        self.mongo = mongo
+        self.config = config or load_config()
+        self.orchestrator_config = orchestrator_config or OrchestratorConfig()
+
+    def _models(self) -> Tuple[str, str, str]:
+        trader_1 = os.getenv("LLM_MODEL_TRADER_1") or "deepseek/deepseek-chat"
+        trader_2 = os.getenv("LLM_MODEL_TRADER_2") or trader_1
+        manager = (
+            os.getenv("LLM_MODEL_MANAGER_FAST")
+            or os.getenv("LLM_MODEL_MANAGER")
+            or self.config.models.manager_model_fast
+            or self.config.models.manager_model
+        )
+        return trader_1, trader_2, manager
+
+    async def _persist_trade_proposal(self, proposal: TradeProposal) -> Optional[str]:
+        doc = jsonify(proposal.model_dump(mode="json"))
+        if not doc.get("run_id"):
+            doc["run_id"] = proposal.run_id
+        if not doc.get("cycle_id"):
+            doc["cycle_id"] = proposal.cycle_id
+        return await self.mongo.insert_one(TRADE_PROPOSALS, doc)
+
+    async def _persist_manager_decision(self, decision: ManagerDecision) -> Optional[str]:
+        doc = jsonify(decision.model_dump(mode="json"))
+        return await self.mongo.insert_one(MANAGER_DECISIONS, doc)
+
+    async def _run_trader(
+        self,
+        *,
+        trader: TechnicalTrader,
+        thin_brief: Dict[str, Any],
+        firm_state: Dict[str, Any],
+        cycle_id: str,
+    ) -> TradeProposal:
+        extra = (
+            "You are a tool-calling agent. You are EXPECTED to use tools aggressively.\n"
+            "Guidance:\n"
+            "- Use up to your tool-call budget to gather facts before proposing any trade.\n"
+            "- Prefer no-trade if facts are insufficient or edge is unclear.\n"
+            "- Output ONLY TradeProposal JSON.\n"
+        )
+        if self.orchestrator_config.extra_trader_instructions:
+            extra = extra + "\n" + self.orchestrator_config.extra_trader_instructions.strip() + "\n"
+        proposal = await trader.decide(
+            market_brief=thin_brief,
+            firm_state=firm_state,
+            extra_instructions=extra,
+        )
+        proposal.run_id = thin_brief.get("run_id") or proposal.run_id
+        proposal.cycle_id = cycle_id
+        proposal.agent_id = trader.agent_id
+        # Do not trust model-provided timestamps; set receipt time deterministically.
+        proposal.timestamp = _utc_now()
+        return proposal
+
+    async def run_cycle(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        cycle_id: Optional[str] = None,
+    ) -> CycleResult:
+        await self.mongo.connect()
+        await self.mongo.ensure_indexes()
+
+        run_id = run_id or _default_run_id()
+        cycle_id = cycle_id or _default_cycle_id()
+
+        audit = AuditManager(self.mongo)
+        audit_ctx = AuditContext(run_id=run_id, agent_id="orchestrator")
+        await audit.log("cycle_start", {"cycle_id": cycle_id}, ctx=audit_ctx)
+
+        # 1) Build snapshot + full brief
+        ingestor = MarketDataIngestor.from_app_config(self.config, mongo=self.mongo, run_id=run_id)
+        snapshot = await ingestor.fetch_and_store_snapshot()
+        snapshot_id = snapshot.get("_id")
+        builder = MarketStateBuilder()
+        full_brief = builder.build_market_brief(snapshot)
+        await audit.log(
+            "market_snapshot_ready",
+            {"cycle_id": cycle_id, "snapshot_ref": str(snapshot_id) if snapshot_id else None},
+            ctx=audit_ctx,
+        )
+
+        symbols = list(self.config.trading.symbols)
+        thin_brief = _thin_market_brief(full_brief, symbols)
+        thin_brief["run_id"] = run_id
+
+        tools_ctx = ToolContext(
+            mongo=self.mongo,
+            config=self.config,
+            market_state_builder=builder,
+            news_connector=None,
+            run_id=run_id,
+        )
+
+        # 2) Firm state for all downstream steps
+        firm_state_dict = await asyncio.wait_for(get_firm_state(context=tools_ctx), timeout=15.0)
+
+        trader_model_1, trader_model_2, manager_model = self._models()
+        await audit.log(
+            "models_selected",
+            {
+                "cycle_id": cycle_id,
+                "trader_models": {"tech_trader_1": trader_model_1, "tech_trader_2": trader_model_2},
+                "manager_model": manager_model,
+            },
+            ctx=audit_ctx,
+        )
+
+        # 3) Run traders in parallel (technical-only, no Tavily/news tools)
+        trader_1 = TechnicalTrader(
+            agent_id="tech_trader_1",
+            config=TechnicalTraderConfig(model=trader_model_1, max_tool_calls=6, max_tool_turns=6),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+                "query_memory",
+            ],
+        )
+        trader_2 = TechnicalTrader(
+            agent_id="tech_trader_2",
+            config=TechnicalTraderConfig(model=trader_model_2, max_tool_calls=6, max_tool_turns=6),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+                "query_memory",
+            ],
+        )
+
+        # Ensure firm budgets map aligns with actual agent_ids used in this run.
+        budgets = dict(firm_state_dict.get("agent_budgets") or {})
+        budgets[trader_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
+        budgets[trader_2.agent_id] = float(self.config.risk.agent_budget_notional_usd)
+        firm_state_dict["agent_budgets"] = budgets
+        firm_state_dict["capital_usdt"] = float(sum(budgets.values())) if budgets else firm_state_dict.get("capital_usdt")
+
+        async def _safe_trader(trader: TechnicalTrader) -> TradeProposal:
+            try:
+                return await asyncio.wait_for(
+                    self._run_trader(
+                        trader=trader,
+                        thin_brief=thin_brief,
+                        firm_state=firm_state_dict,
+                        cycle_id=cycle_id,
+                    ),
+                    timeout=self.orchestrator_config.trader_timeout_s,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                model = trader_model_1 if trader.agent_id == "tech_trader_1" else trader_model_2
+                await audit.log(
+                    "trader_error",
+                    {
+                        "cycle_id": cycle_id,
+                        "agent_id": trader.agent_id,
+                        "model": model,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "error_repr": repr(e),
+                    },
+                    ctx=audit_ctx,
+                )
+                return TradeProposal(
+                    agent_id=trader.agent_id,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    timestamp=_utc_now(),
+                    trades=[],
+                    notes=f"Trader error; forced no-trade. error={e}",
+                )
+
+        proposals: List[TradeProposal] = list(
+            await asyncio.gather(_safe_trader(trader_1), _safe_trader(trader_2))
+        )
+        await audit.log(
+            "tool_results_summary_traders",
+            {
+                "cycle_id": cycle_id,
+                "agents": {
+                    trader_1.agent_id: _summarize_tool_messages(trader_1.last_messages),
+                    trader_2.agent_id: _summarize_tool_messages(trader_2.last_messages),
+                },
+            },
+            ctx=audit_ctx,
+        )
+        await audit.log(
+            "tool_usage_traders",
+            {
+                "cycle_id": cycle_id,
+                "agents": {
+                    trader_1.agent_id: {
+                        "tool_calls": len(trader_1.last_tool_calls),
+                        "tools": [c.get("name") for c in trader_1.last_tool_calls],
+                    },
+                    trader_2.agent_id: {
+                        "tool_calls": len(trader_2.last_tool_calls),
+                        "tools": [c.get("name") for c in trader_2.last_tool_calls],
+                    },
+                },
+            },
+            ctx=audit_ctx,
+        )
+        await audit.log(
+            "trader_proposals_ready",
+            {"cycle_id": cycle_id, "proposals": [p.model_dump(mode="json") for p in proposals]},
+            ctx=audit_ctx,
+        )
+
+        for p in proposals:
+            await self._persist_trade_proposal(p)
+
+        # 4) Risk validation (deterministic) + manager decision
+        compliance_reports = [
+            await validate_proposal(p, tools_context=tools_ctx, firm_state=firm_state_dict, market_brief=full_brief)
+            for p in proposals
+        ]
+        await audit.log(
+            "risk_reports_ready",
+            {"cycle_id": cycle_id, "reports": [r.model_dump(mode="json") for r in compliance_reports]},
+            ctx=audit_ctx,
+        )
+
+        manager = ManagerAgent(
+            manager_id="manager",
+            config=ManagerConfig(model=manager_model, max_tool_calls=4, max_tool_turns=4),
+            tools_context=tools_ctx,
+        )
+        manager_extra = (
+            "For EVERY proposal trade you decide on, set DecisionItem.agent_id and DecisionItem.trade_index.\n"
+            "trade_index is the index into that agent's TradeProposal.trades array.\n"
+            "Hard violations MUST be vetoed.\n"
+            "Output ONLY ManagerDecision JSON.\n"
+        )
+
+        manager_decision: Optional[ManagerDecision] = None
+        try:
+            manager_decision = await asyncio.wait_for(
+                manager.decide(
+                    proposals=[p.model_dump(mode="json") for p in proposals],
+                    compliance_reports=[r.model_dump(mode="json") for r in compliance_reports],
+                    firm_state=firm_state_dict,
+                    positions_by_agent=None,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    extra_instructions=manager_extra,
+                ),
+                timeout=self.orchestrator_config.manager_timeout_s,
+            )
+            # Do not trust model-provided timestamps or ids; normalize deterministically.
+            manager_decision.manager_id = manager.manager_id
+            manager_decision.run_id = run_id
+            manager_decision.cycle_id = cycle_id
+            manager_decision.timestamp = _utc_now()
+            # Execution safety: if manager forgot agent_id/trade_index for an approve/resize, defer it.
+            for item in manager_decision.decisions:
+                if item.decision in {DecisionType.approve, DecisionType.resize} and (
+                    item.agent_id is None or item.trade_index is None
+                ):
+                    item.decision = DecisionType.defer
+                    item.approved_size_usdt = None
+                    item.approved_leverage = None
+                    item.notes = (item.notes or "") + " [SYSTEM: missing agent_id/trade_index; deferred for safety]"
+            await audit.log(
+                "tool_usage_manager",
+                {
+                    "cycle_id": cycle_id,
+                    "agent_id": manager.manager_id,
+                    "tool_calls": len(manager.last_tool_calls),
+                    "tools": [c.get("name") for c in manager.last_tool_calls],
+                },
+                ctx=audit_ctx,
+            )
+            await self._persist_manager_decision(manager_decision)
+            await audit.log(
+                "manager_decision_ready",
+                {"cycle_id": cycle_id, "decision": manager_decision.model_dump(mode="json")},
+                ctx=audit_ctx,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            await audit.log(
+                "manager_error",
+                {
+                    "cycle_id": cycle_id,
+                    "model": manager_model,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "error_repr": repr(e),
+                },
+                ctx=audit_ctx,
+            )
+
+        # 5) Build plan + execute
+        order_plan_intents = 0
+        execution_status = "skipped"
+        plan = None
+        if manager_decision is not None:
+            try:
+                plan = build_order_plan(proposals=proposals, manager_decision=manager_decision)
+                order_plan_intents = len(plan.intents)
+                await audit.log(
+                    "order_plan_ready",
+                    {"cycle_id": cycle_id, "intents": [i.model_dump(mode="json") for i in plan.intents]},
+                    ctx=audit_ctx,
+                )
+            except OrderPlanError as e:
+                await audit.log(
+                    "order_plan_error",
+                    {"cycle_id": cycle_id, "error": str(e)},
+                    ctx=audit_ctx,
+                )
+
+            if self.orchestrator_config.execute_testnet and order_plan_intents > 0 and plan is not None:
+                try:
+                    client = BinanceFuturesClient(
+                        testnet=self.config.binance.testnet,
+                        base_url=self.config.binance.base_url,
+                        recv_window=self.config.binance.recv_window,
+                        allow_mainnet=self.config.binance.allow_mainnet,
+                        audit_mgr=self.mongo,
+                        run_id=run_id,
+                        agent_id="execution",
+                    )
+                    executor = OrderExecutor(
+                        mongo=self.mongo,
+                        client=client,
+                        config=ExecutorConfig(),
+                    )
+                    if plan is not None:
+                        report = await executor.execute_plan(plan)
+                        execution_status = _execution_status_from_report(report)
+                        await audit.log(
+                            "execution_report",
+                            {"cycle_id": cycle_id, "report": report.model_dump(mode="json")},
+                            ctx=audit_ctx,
+                        )
+
+                        tracker = PositionTracker(mongo=self.mongo, client=client)
+                        await tracker.sync_positions(run_id=run_id, cycle_id=cycle_id, symbols=symbols)
+                        await audit.log(
+                            "positions_synced",
+                            {"cycle_id": cycle_id},
+                            ctx=audit_ctx,
+                        )
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    execution_status = f"error:{e}"
+                    await audit.log(
+                        "execution_error",
+                        {"cycle_id": cycle_id, "error": str(e)},
+                        ctx=audit_ctx,
+                    )
+
+        await audit.log(
+            "cycle_end",
+            {
+                "cycle_id": cycle_id,
+                "order_plan_intents": order_plan_intents,
+                "execution_status": execution_status,
+                "t_s": time.time(),
+            },
+            ctx=audit_ctx,
+        )
+
+        return CycleResult(
+            run_id=run_id,
+            cycle_id=cycle_id,
+            snapshot_id=str(snapshot_id) if snapshot_id else None,
+            proposals=proposals,
+            manager_decision=manager_decision,
+            order_plan_intents=order_plan_intents,
+            execution_status=str(execution_status),
+        )
+
+
+__all__ = ["Orchestrator", "OrchestratorConfig", "CycleResult"]

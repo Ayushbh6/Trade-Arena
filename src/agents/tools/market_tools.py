@@ -30,6 +30,7 @@ async def get_market_brief(
     *,
     symbols: List[str],
     lookback_minutes: int = 240,
+    detail_level: str = "compact",
     allow_live_fetch: bool = False,
     context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
@@ -55,7 +56,74 @@ async def get_market_brief(
         if ctx.mongo is not None:
             await ctx.mongo.insert_one(MARKET_SNAPSHOTS, snapshot)
 
-    brief = builder.build_market_brief(snapshot)
+    full_brief = builder.build_market_brief(snapshot)
+
+    if detail_level == "full":
+        brief = full_brief
+    else:
+        # Compact deterministic brief for LLM context:
+        # - keep per-symbol mark/funding/oi/spread
+        # - keep a small per-timeframe indicator subset (already compact in get_indicator_pack defaults)
+        # - omit correlation matrix (can be very large)
+        per_symbol_full = full_brief.get("per_symbol") or {}
+        compact_per: Dict[str, Any] = {}
+        for sym in symbols:
+            ps = per_symbol_full.get(sym) or {}
+            tf_full = ps.get("timeframes") or {}
+            compact_tfs: Dict[str, Any] = {}
+            for tf, tf_state in tf_full.items():
+                ind = (tf_state.get("indicators") or {}) if isinstance(tf_state, dict) else {}
+                subset = [
+                    "trend",
+                    "vol_regime",
+                    "rsi_14",
+                    "atr_14",
+                    "bb_width",
+                    "ema_20",
+                    "sma_50",
+                ]
+                compact_tfs[tf] = {
+                    "last_close": tf_state.get("last_close") if isinstance(tf_state, dict) else None,
+                    "return_last_bar": tf_state.get("return_last_bar") if isinstance(tf_state, dict) else None,
+                    "indicators": {k: ind.get(k) for k in subset if k in ind},
+                }
+            tob = ps.get("top_of_book") or {}
+            compact_per[sym] = {
+                "mark_price": ps.get("mark_price"),
+                "funding_rate": ps.get("funding_rate"),
+                "open_interest": ps.get("open_interest"),
+                "top_of_book": {
+                    "bid": tob.get("bid"),
+                    "ask": tob.get("ask"),
+                    "spread": tob.get("spread"),
+                },
+                "timeframes": compact_tfs,
+            }
+
+        breadth = ((full_brief.get("market_metrics") or {}).get("breadth")) if isinstance(full_brief.get("market_metrics"), dict) else None
+        movers = []
+        try:
+            # movers are embedded in neutral_summary; keep breadth only.
+            movers = []
+        except Exception:
+            movers = []
+
+        brief = {
+            "timestamp": full_brief.get("timestamp"),
+            "run_id": full_brief.get("run_id"),
+            "symbols": symbols,
+            "snapshot_ref": {
+                "collection": MARKET_SNAPSHOTS,
+                "id": snapshot.get("_id"),
+                "run_id": snapshot.get("run_id"),
+                "timestamp": snapshot.get("timestamp"),
+            },
+            "per_symbol": compact_per,
+            "market_metrics": {"breadth": breadth, "top_movers": movers},
+            "events": {"news": []},
+            "neutral_summary": full_brief.get("neutral_summary"),
+            "meta": {"detail_level": "compact"},
+        }
 
     # Attach recent news (if available)
     if ctx.mongo is not None:
