@@ -1,7 +1,7 @@
 """Single-cycle orchestrator (Phase 5.1).
 
 This module runs one end-to-end cycle:
-  snapshot -> market brief -> traders (parallel) -> risk -> manager -> plan -> execute -> sync positions
+  snapshot -> market brief -> traders (parallel) -> risk -> manager -> plan -> execute -> sync positions -> portfolio update
 
 Notes:
 - Traders receive a thin brief and are expected to use tools.
@@ -27,13 +27,15 @@ from src.config import AppConfig, load_config
 from src.data.audit import AuditContext, AuditManager
 from src.data.market_data import MarketDataIngestor
 from src.data.mongo import MongoManager, jsonify
-from src.data.schemas import MANAGER_DECISIONS, TRADE_PROPOSALS
+from src.data.schemas import MANAGER_DECISIONS, TRADE_PROPOSALS, PNL_REPORTS
 from src.execution.binance_client import BinanceFuturesClient
 from src.execution.executor import ExecutorConfig, OrderExecutor
 from src.execution.planner import OrderPlanError, build_order_plan
 from src.execution.position_tracker import PositionTracker
 from src.execution.schemas import ExecutionStatus
 from src.features.market_state import MarketStateBuilder
+from src.portfolio.portfolio import PortfolioManager
+from src.portfolio.reporting import ReportingEngine
 from src.risk.validator import validate_proposal
 
 
@@ -110,6 +112,38 @@ def _execution_status_from_report(report: Any) -> str:
     return "skipped"
 
 
+def _parse_agent_from_client_id(client_order_id: str) -> Optional[str]:
+    """
+    Parses agent_id from 'o_{hash}'.
+    Since hashing destroys info, we cannot reverse it.
+    However, we need agent attribution.
+    
+    CRITICAL FIX: The current make_client_order_id hashes the agent_id.
+    We cannot reverse it.
+    
+    Workaround for MVP:
+    We will rely on the Executor's OrderPlan which maps client_order_id -> agent_id.
+    But here we only have the fill from Binance.
+    
+    Better approach:
+    The OrderPlan knows the mapping. We should cache it or pass it to the portfolio update step.
+    
+    Actually, for MVP, we'll try to match the trade's symbol/side/time to the proposal.
+    But that's brittle.
+    
+    Wait, the 'client_order_id' IS returned by Binance in the trade history.
+    If we can't reverse the hash, we can't know the agent.
+    
+    Plan B:
+    We don't need to reverse the hash if we stored the mapping "client_order_id -> agent_id" 
+    during execution planning.
+    
+    The Orchestrator builds the plan. It can build a lookup map.
+    """
+    # Placeholder: requires lookup map passed from plan
+    return None
+
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
     trader_timeout_s: float = 120.0
@@ -134,10 +168,14 @@ class Orchestrator:
         self,
         *,
         mongo: MongoManager,
+        portfolio_manager: Optional[PortfolioManager] = None,
+        reporting_engine: Optional[ReportingEngine] = None,
         config: Optional[AppConfig] = None,
         orchestrator_config: Optional[OrchestratorConfig] = None,
     ):
         self.mongo = mongo
+        self.portfolio_manager = portfolio_manager
+        self.reporting_engine = reporting_engine
         self.config = config or load_config()
         self.orchestrator_config = orchestrator_config or OrchestratorConfig()
 
@@ -163,6 +201,9 @@ class Orchestrator:
     async def _persist_manager_decision(self, decision: ManagerDecision) -> Optional[str]:
         doc = jsonify(decision.model_dump(mode="json"))
         return await self.mongo.insert_one(MANAGER_DECISIONS, doc)
+
+    async def _persist_pnl_report(self, report: Dict[str, Any]) -> Optional[str]:
+        return await self.mongo.insert_one(PNL_REPORTS, report)
 
     async def _run_trader(
         self,
@@ -204,6 +245,9 @@ class Orchestrator:
 
         run_id = run_id or _default_run_id()
         cycle_id = cycle_id or _default_cycle_id()
+        
+        # Track start time for trade filtering (add a small buffer)
+        cycle_start_ms = int((time.time() - 5) * 1000)
 
         audit = AuditManager(self.mongo)
         audit_ctx = AuditContext(run_id=run_id, agent_id="orchestrator")
@@ -274,6 +318,14 @@ class Orchestrator:
                 "query_memory",
             ],
         )
+
+        # Initialize portfolios if needed
+        if self.portfolio_manager:
+            budget_notional = float(self.config.risk.agent_budget_notional_usd)
+            if trader_1.agent_id not in self.portfolio_manager.portfolios:
+                self.portfolio_manager.initialize_agent(trader_1.agent_id, budget_notional)
+            if trader_2.agent_id not in self.portfolio_manager.portfolios:
+                self.portfolio_manager.initialize_agent(trader_2.agent_id, budget_notional)
 
         # Ensure firm budgets map aligns with actual agent_ids used in this run.
         budgets = dict(firm_state_dict.get("agent_budgets") or {})
@@ -440,10 +492,18 @@ class Orchestrator:
         order_plan_intents = 0
         execution_status = "skipped"
         plan = None
+        
+        # Mapping to resolve attribution later: client_order_id -> agent_id
+        order_id_to_agent: Dict[str, str] = {}
+        
         if manager_decision is not None:
             try:
                 plan = build_order_plan(proposals=proposals, manager_decision=manager_decision)
                 order_plan_intents = len(plan.intents)
+                for intent in plan.intents:
+                    if intent.agent_id:
+                        order_id_to_agent[intent.client_order_id] = intent.agent_id
+                        
                 await audit.log(
                     "order_plan_ready",
                     {"cycle_id": cycle_id, "intents": [i.model_dump(mode="json") for i in plan.intents]},
@@ -456,8 +516,58 @@ class Orchestrator:
                     ctx=audit_ctx,
                 )
 
-            if self.orchestrator_config.execute_testnet and order_plan_intents > 0 and plan is not None:
-                try:
+        report = None # To hold execution report if any
+
+        if self.orchestrator_config.execute_testnet and order_plan_intents > 0 and plan is not None:
+            try:
+                client = BinanceFuturesClient(
+                    testnet=self.config.binance.testnet,
+                    base_url=self.config.binance.base_url,
+                    recv_window=self.config.binance.recv_window,
+                    allow_mainnet=self.config.binance.allow_mainnet,
+                    audit_mgr=self.mongo,
+                    run_id=run_id,
+                    agent_id="execution",
+                )
+                executor = OrderExecutor(
+                    mongo=self.mongo,
+                    client=client,
+                    config=ExecutorConfig(),
+                )
+                if plan is not None:
+                    report = await executor.execute_plan(plan)
+                    execution_status = _execution_status_from_report(report)
+                    await audit.log(
+                        "execution_report",
+                        {"cycle_id": cycle_id, "report": report.model_dump(mode="json")},
+                        ctx=audit_ctx,
+                    )
+
+                    tracker = PositionTracker(mongo=self.mongo, client=client)
+                    await tracker.sync_positions(run_id=run_id, cycle_id=cycle_id, symbols=symbols)
+                    await audit.log(
+                        "positions_synced",
+                        {"cycle_id": cycle_id},
+                        ctx=audit_ctx,
+                    )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                execution_status = f"error:{e}"
+                await audit.log(
+                    "execution_error",
+                    {"cycle_id": cycle_id, "error": str(e)},
+                    ctx=audit_ctx,
+                )
+
+        # --- Portfolio Update (Runs every cycle) ---
+        if self.portfolio_manager and self.reporting_engine:
+            try:
+                # 1. Process Fills (if execution happened)
+                if report and self.orchestrator_config.execute_testnet:
+                    # Re-instantiate client if needed (scope issue? no, we need client to fetch trades)
+                    # Ideally client should be available.
+                    # If we executed, we have 'client' variable in scope? NO, it was in inner block.
+                    # We need to instantiate client again or move instantiation out.
+                    # Instantiating client is cheap (just config).
                     client = BinanceFuturesClient(
                         testnet=self.config.binance.testnet,
                         base_url=self.config.binance.base_url,
@@ -467,34 +577,48 @@ class Orchestrator:
                         run_id=run_id,
                         agent_id="execution",
                     )
-                    executor = OrderExecutor(
-                        mongo=self.mongo,
-                        client=client,
-                        config=ExecutorConfig(),
-                    )
-                    if plan is not None:
-                        report = await executor.execute_plan(plan)
-                        execution_status = _execution_status_from_report(report)
-                        await audit.log(
-                            "execution_report",
-                            {"cycle_id": cycle_id, "report": report.model_dump(mode="json")},
-                            ctx=audit_ctx,
-                        )
+                    
+                    traded_symbols = {i.symbol for i in plan.intents} if plan else set()
+                    for sym in traded_symbols:
+                        try:
+                            recent_trades = client.get_recent_trades(symbol=sym, start_time=cycle_start_ms)
+                            
+                            # Build map: exchange_order_id -> agent_id from the REPORT
+                            exchange_id_to_agent = {}
+                            if report and report.results:
+                                for res in report.results:
+                                    if res.exchange_order_id and res.client_order_id:
+                                        ag_id = order_id_to_agent.get(res.client_order_id)
+                                        if ag_id:
+                                            exchange_id_to_agent[res.exchange_order_id] = ag_id
+                            
+                            for t in recent_trades:
+                                tid = t.get("orderId")
+                                agent_id = exchange_id_to_agent.get(tid)
+                                
+                                if agent_id:
+                                    self.portfolio_manager.on_fill(
+                                        agent_id=agent_id,
+                                        symbol=t["symbol"],
+                                        side=t["side"],
+                                        quantity=float(t["qty"]),
+                                        price=float(t["price"]),
+                                        fee=float(t.get("commission", 0))
+                                    )
+                        except Exception as ex:
+                            await audit.log("portfolio_trade_fetch_error", {"symbol": sym, "error": str(ex)}, ctx=audit_ctx)
 
-                        tracker = PositionTracker(mongo=self.mongo, client=client)
-                        await tracker.sync_positions(run_id=run_id, cycle_id=cycle_id, symbols=symbols)
-                        await audit.log(
-                            "positions_synced",
-                            {"cycle_id": cycle_id},
-                            ctx=audit_ctx,
-                        )
-                except Exception as e:  # pylint: disable=broad-exception-caught
-                    execution_status = f"error:{e}"
-                    await audit.log(
-                        "execution_error",
-                        {"cycle_id": cycle_id, "error": str(e)},
-                        ctx=audit_ctx,
-                    )
+                # 2. Mark to Market (Always)
+                current_prices = {s: d["last_price"] for s, d in thin_brief.get("per_symbol", {}).items() if d.get("last_price")}
+                self.portfolio_manager.mark_to_market(current_prices)
+                
+                # 3. Generate Report (Always)
+                pnl_report = self.reporting_engine.generate_cycle_report(run_id, cycle_id)
+                await self._persist_pnl_report(pnl_report)
+                await audit.log("pnl_report_generated", {"report": pnl_report}, ctx=audit_ctx)
+
+            except Exception as e:
+                await audit.log("portfolio_update_error", {"error": str(e)}, ctx=audit_ctx)
 
         await audit.log(
             "cycle_end",

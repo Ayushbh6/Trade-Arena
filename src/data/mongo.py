@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, TypeAlias
 
 from pymongo.errors import PyMongoError
 
-from .schemas import AUDIT_LOG, COLLECTION_SPECS, LLM_CALLS
+from .schemas import AUDIT_LOG, COLLECTION_SPECS, LLM_CALLS, PNL_REPORTS, MARKET_SNAPSHOTS
 
 # Motor types for static checking without upsetting Pylance at runtime.
 if TYPE_CHECKING:

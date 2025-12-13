@@ -48,6 +48,8 @@ from src.execution.binance_client import BinanceFuturesClient  # noqa: E402
 from src.execution.executor import ExecutorConfig, OrderExecutor  # noqa: E402
 from src.execution.planner import build_order_plan  # noqa: E402
 from src.orchestrator.orchestrator import Orchestrator, OrchestratorConfig  # noqa: E402
+from src.portfolio.portfolio import PortfolioManager  # noqa: E402
+from src.portfolio.reporting import ReportingEngine  # noqa: E402
 
 
 def _print_section(title: str) -> None:
@@ -91,6 +93,9 @@ async def _tail_audit(
         # positions
         "positions_sync_start",
         "positions_sync_complete",
+        # portfolio
+        "pnl_report_generated",
+        "portfolio_trade_fetch_error",
     }
 
     def _id_str(doc: dict) -> str:
@@ -171,6 +176,15 @@ async def _tail_audit(
                 if et == "positions_sync_complete":
                     _print_kv("synced", str(payload.get("synced")))
                 continue
+                
+            if et == "pnl_report_generated":
+                _print_section(f"pnl_report_generated {ts}")
+                report = payload.get("report") or {}
+                # Print summary metrics
+                firm = report.get("firm_metrics") or {}
+                _print_kv("firm_equity", str(firm.get("total_equity")))
+                _print_kv("firm_roi", str(firm.get("roi_pct")))
+                continue
 
         if saw_cycle_end:
             return
@@ -235,9 +249,15 @@ async def main() -> None:
     symbols = list(cfg.trading.symbols)
     await _cleanup_symbols(client, symbols)
     print("[OK] Pre-cleanup done.")
+    
+    # Init Portfolio Manager
+    portfolio_manager = PortfolioManager()
+    reporting_engine = ReportingEngine(portfolio_manager)
 
     orch = Orchestrator(
         mongo=mongo,
+        portfolio_manager=portfolio_manager,
+        reporting_engine=reporting_engine,
         config=cfg,
         orchestrator_config=OrchestratorConfig(
             execute_testnet=True,

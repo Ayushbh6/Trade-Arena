@@ -314,6 +314,32 @@ class BinanceFuturesClient:
         )
         return res
 
+    def get_recent_trades(
+        self, *, symbol: str, limit: int = 50, start_time: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent trades (fills) for a specific symbol.
+        
+        Note: This endpoint returns the user's trades, not public market trades.
+        """
+        start = time.perf_counter()
+        params = {"symbol": symbol, "limit": limit, "recvWindow": self.recv_window}
+        if start_time:
+            params["startTime"] = start_time
+
+        try:
+            res = self.client.futures_account_trades(**params)
+            self._audit(
+                "binance_get_account_trades",
+                {"symbol": symbol, "count": len(res), "latency_s": time.perf_counter() - start},
+            )
+            return res
+        except (BinanceAPIException, BinanceRequestException) as e:
+            self._audit(
+                "binance_get_account_trades",
+                {"symbol": symbol, "error": str(e)},
+            )
+            raise
+
 
 __all__ = [
     "BinanceConfigError",

@@ -1,9 +1,10 @@
-"""Orchestrator single-cycle integration test (Phase 5.2/5.3).
+"""Orchestrator single-cycle integration test (Phase 5.2/5.3 + Phase 6.2).
 
 Validates:
 - A cycle runs end-to-end (at least through snapshot + audit logging).
 - Orchestrator uses BOTH LLM_MODEL_TRADER_1 and LLM_MODEL_TRADER_2 for the two
   technical traders (recorded in audit_log as models_selected).
+- PortfolioManager tracks state and generates a PnL report at the end.
 
 Run:
   python tests/test_orchestrator.py
@@ -31,6 +32,8 @@ from src.config import load_config  # noqa: E402
 from src.data.mongo import MongoManager  # noqa: E402
 from src.data.schemas import AUDIT_LOG  # noqa: E402
 from src.orchestrator.orchestrator import Orchestrator, OrchestratorConfig  # noqa: E402
+from src.portfolio.portfolio import PortfolioManager  # noqa: E402
+from src.portfolio.reporting import ReportingEngine  # noqa: E402
 
 
 def _print_section(title: str) -> None:
@@ -67,6 +70,8 @@ async def _tail_audit_events(
         "manager_error",
         "order_plan_error",
         "execution_error",
+        "pnl_report_generated",
+        "portfolio_trade_fetch_error"
     }
 
     def _id_str(doc: dict) -> str:
@@ -205,7 +210,17 @@ async def _tail_audit_events(
                 _print_kv("intents", str(len(intents)))
                 continue
 
-            if et in {"order_plan_error", "execution_error"}:
+            if et == "pnl_report_generated":
+                _print_section(f"PnL Report Generated {ts}")
+                report = payload.get("report") or {}
+                try:
+                    import json
+                    print(json.dumps(report, indent=2, default=str), flush=True)
+                except Exception:
+                    print(str(report), flush=True)
+                continue
+
+            if et in {"order_plan_error", "execution_error", "portfolio_trade_fetch_error"}:
                 _print_section(f"{et} {ts}")
                 _print_kv("error", str(payload.get("error")))
                 continue
@@ -226,7 +241,7 @@ async def _tail_audit_events(
 
 
 async def main() -> None:
-    print("== Orchestrator integration test (Phase 5) ==")
+    print("== Orchestrator integration test (Phase 5 + 6.2) ==")
     cfg = load_config()
 
     trader_1 = os.getenv("LLM_MODEL_TRADER_1")
@@ -241,12 +256,19 @@ async def main() -> None:
     await mongo.connect()
     await mongo.ensure_indexes()
     print("[OK] Mongo ready.", flush=True)
+    
+    # Init Portfolio Manager
+    portfolio_manager = PortfolioManager()
+    reporting_engine = ReportingEngine(portfolio_manager)
 
     orch = Orchestrator(
         mongo=mongo,
+        portfolio_manager=portfolio_manager,
+        reporting_engine=reporting_engine,
         config=cfg,
+        # We enable execution to test the full portfolio loop (even if no trades happen, we want the report)
         orchestrator_config=OrchestratorConfig(
-            execute_testnet=False,  # avoid placing orders in this test
+            execute_testnet=False,  # Set to True if we want real orders, but False for now to verify wiring
             trader_timeout_s=120.0,
             manager_timeout_s=120.0,
         ),

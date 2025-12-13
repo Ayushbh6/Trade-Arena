@@ -17,6 +17,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.data.audit import AuditContext, AuditManager
 from src.orchestrator.orchestrator import Orchestrator
+from src.portfolio.portfolio import PortfolioManager
+from src.portfolio.reporting import ReportingEngine
 
 
 def _utc_now() -> datetime:
@@ -33,6 +35,12 @@ class MainLoopConfig:
 
 
 async def run_once(*, orchestrator: Orchestrator, run_id: str, cycle_id: Optional[str] = None) -> None:
+    # Ensure portfolio/reporting are present if orchestrator was created without them externally
+    if not orchestrator.portfolio_manager:
+        orchestrator.portfolio_manager = PortfolioManager()
+    if not orchestrator.reporting_engine:
+        orchestrator.reporting_engine = ReportingEngine(orchestrator.portfolio_manager)
+
     await orchestrator.run_cycle(run_id=run_id, cycle_id=cycle_id or _cycle_id())
 
 
@@ -43,6 +51,15 @@ async def run_forever(
     cfg: MainLoopConfig,
 ) -> None:
     stop_event = asyncio.Event()
+
+    # Instantiate Portfolio Manager and Reporting Engine
+    # Note: These persist across cycles in the main loop
+    portfolio_manager = PortfolioManager()
+    reporting_engine = ReportingEngine(portfolio_manager)
+    
+    # Inject into orchestrator
+    orchestrator.portfolio_manager = portfolio_manager
+    orchestrator.reporting_engine = reporting_engine
 
     def _request_stop(*_args: object) -> None:
         stop_event.set()
