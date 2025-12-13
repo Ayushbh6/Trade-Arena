@@ -52,6 +52,14 @@ class BaseTraderConfig:
 class BaseTrader:
     """Common REACT loop for trader agents."""
 
+    def _redact_identity_fields(self, text: str) -> str:
+        """Redact model-echoed identity fields from logs/errors for clarity."""
+        s = text or ""
+        s = re.sub(r'("run_id"\s*:\s*)"[^"]*"', r'\1"<redacted>"', s)
+        s = re.sub(r'("cycle_id"\s*:\s*)"[^"]*"', r'\1"<redacted>"', s)
+        s = re.sub(r'("timestamp"\s*:\s*)"[^"]*"', r'\1"<redacted>"', s)
+        return s
+
     def _count_tokens(self, text: str) -> int:
         if not text:
             return 0
@@ -117,6 +125,83 @@ class BaseTrader:
         final_payload = _omit_big_lists(payload)
         return final_payload, True or truncated
 
+    def _sanitize_trade_proposal_dict(self, obj: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        """Deterministically repair malformed proposals into a safe, valid shape.
+
+        If any trade idea is invalid (e.g. non-numeric leverage, size_usdt<=0),
+        drop/normalize it so the proposal can still validate (often as a no-trade).
+        """
+        repaired = False
+        out: Dict[str, Any] = dict(obj or {})
+
+        trades = out.get("trades")
+        if not isinstance(trades, list):
+            out["trades"] = []
+            return out, True
+
+        def _to_float_or_none(x: Any) -> Optional[float]:
+            if x is None:
+                return None
+            try:
+                return float(x)
+            except Exception:
+                return None
+
+        cleaned: List[Dict[str, Any]] = []
+        for t in trades:
+            if not isinstance(t, dict):
+                repaired = True
+                continue
+
+            trade = dict(t)
+            # "hold" is not an actionable trade in this protocol. No-trade is expressed as trades=[].
+            action = trade.get("action")
+            if action == "hold":
+                repaired = True
+                continue
+
+            size = _to_float_or_none(trade.get("size_usdt"))
+            if size is None or size <= 0:
+                repaired = True
+                continue
+            trade["size_usdt"] = float(size)
+
+            lev = _to_float_or_none(trade.get("leverage"))
+            if lev is None or lev <= 0:
+                if trade.get("leverage") is not None:
+                    repaired = True
+                trade["leverage"] = None
+            else:
+                trade["leverage"] = float(lev)
+
+            order_type = trade.get("order_type")
+            if order_type == OrderType.market.value:
+                if trade.get("limit_price") is not None:
+                    repaired = True
+                    trade["limit_price"] = None
+            elif order_type == OrderType.limit.value:
+                lp = _to_float_or_none(trade.get("limit_price"))
+                if lp is None or lp <= 0:
+                    repaired = True
+                    continue
+                trade["limit_price"] = float(lp)
+
+            sl = _to_float_or_none(trade.get("stop_loss"))
+            trade["stop_loss"] = float(sl) if sl is not None and sl > 0 else None
+            tp = _to_float_or_none(trade.get("take_profit"))
+            trade["take_profit"] = float(tp) if tp is not None and tp > 0 else None
+
+            cleaned.append(trade)
+
+        if repaired:
+            out["trades"] = cleaned
+            notes = (out.get("notes") or "").strip()
+            suffix = "[SYSTEM: invalid trades removed/normalized]"
+            if suffix not in notes:
+                out["notes"] = (notes + " " + suffix).strip() if notes else suffix
+
+        return out, repaired
+
     def _tool_signatures_text(self) -> str:
         specs = build_tool_specs(
             self.tools_context,
@@ -160,6 +245,9 @@ class BaseTrader:
         # This still enforces schema via Pydantic model validation.
         try:
             obj = json.loads(s, strict=False)
+            if isinstance(obj, dict):
+                repaired_obj, _ = self._sanitize_trade_proposal_dict(obj)
+                return TradeProposal.model_validate(repaired_obj)
             return TradeProposal.model_validate(obj)
         except Exception as e:
             snippet = s[:500].replace("\n", "\\n")
@@ -200,6 +288,8 @@ class BaseTrader:
             "- tags: array of strings (optional)\n\n"
             f"ManagerDecision (for awareness): decision values {decision_vals}.\n"
             "Rules:\n"
+            "- If you want to HOLD / do nothing: return trades=[] and explain in notes. Do NOT output action='hold'.\n"
+            "- Never use size_usdt=0; if no trade, use trades=[].\n"
             "- Do NOT add any keys beyond those listed.\n"
             "- Use null for unknown optional fields.\n"
         )
@@ -610,7 +700,8 @@ class BaseTrader:
                 break
 
         raise RuntimeError(
-            f"Final TradeProposal output invalid after retries. Last output snippet: {final_content[:300]}"
+            "Final TradeProposal output invalid after retries. Last output snippet: "
+            f"{self._redact_identity_fields(final_content[:300])}"
         ) from last_err
 
 

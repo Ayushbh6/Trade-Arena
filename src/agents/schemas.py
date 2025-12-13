@@ -38,7 +38,6 @@ class TradeAction(str, Enum):
     add = "add"
     reduce = "reduce"
     close = "close"
-    hold = "hold"
 
 
 class TradeIdea(BaseModel):
@@ -46,7 +45,7 @@ class TradeIdea(BaseModel):
 
     symbol: str = Field(..., description="Exchange symbol, e.g., BTCUSDT")
     side: Side = Field(..., description="long or short")
-    action: TradeAction = Field(..., description="open/add/reduce/close/hold")
+    action: TradeAction = Field(..., description="open/add/reduce/close")
 
     size_usdt: float = Field(
         ...,
