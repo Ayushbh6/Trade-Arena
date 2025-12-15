@@ -7,11 +7,24 @@ No external agent frameworks.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from Utils.openrouter import chat_completion_raw
+from src.agents.memory.context_manager import (
+    ConversationTurn,
+    TurnRole,
+    enforce_max_prompt_tokens,
+    render_instant_transcript,
+    render_ledger_for_prompt,
+    trim_instant_turns_to_budget,
+)
+from src.agents.memory.reground import rebuild_ledger_facts_from_mongo
+from src.agents.memory.state_store import ContextStateStore
+from src.agents.memory.summarizer import SummarizerConfig, summarize_narrative
 from src.data.mongo import jsonify
 from src.agents.schemas import (
     DecisionType,
@@ -44,6 +57,16 @@ class BaseTraderConfig:
     tool_choice: str = "auto"
     final_retry_on_invalid_json: bool = True
     allowed_tools: Optional[List[str]] = None
+    # Phase 7: persistent context (raw QnA + narrative + non-negotiable ledger).
+    # Default off to preserve current behavior until orchestrator enables it.
+    enable_phase7_context: bool = False
+    enable_phase7_compression: bool = False
+    phase7_summarizer_model: Optional[str] = None
+    # Budget safety belt for the *incoming* market brief / firm state / positions that
+    # are embedded into the user prompt. Tools have their own output caps.
+    max_market_brief_tokens: int = 15000
+    max_firm_state_tokens: int = 4000
+    max_position_summary_tokens: int = 6000
     # Per-tool-call output budget to prevent provider context overflow.
     # This is an approximation (cl100k_base) but works as a safety belt.
     max_tool_output_tokens: int = 8000
@@ -51,6 +74,108 @@ class BaseTraderConfig:
 
 class BaseTrader:
     """Common REACT loop for trader agents."""
+
+    async def _load_phase7_blocks(
+        self,
+        *,
+        run_id: Optional[str],
+        cycle_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not self.config.enable_phase7_context:
+            return None
+        if not run_id:
+            return None
+        if self.tools_context is None or self.tools_context.mongo is None:
+            return None
+
+        store = ContextStateStore(mongo=self.tools_context.mongo)
+        state = await store.load_or_create(run_id=run_id, agent_id=self.agent_id)
+
+        # Safe MVP default: deterministically re-ground facts every cycle.
+        facts = await rebuild_ledger_facts_from_mongo(
+            mongo=self.tools_context.mongo,
+            run_id=run_id,
+            agent_id=self.agent_id,
+            max_outcomes=10,
+        )
+        state.ledger.facts = facts
+
+        kept, _dropped = trim_instant_turns_to_budget(
+            turns=state.instant_turns,
+            max_tokens=state.budget.max_instant_tokens,
+        )
+        state.instant_turns = kept
+        if _dropped:
+            dropped_text = render_instant_transcript(_dropped)
+            if dropped_text:
+                prefix = "\n\n--- Dropped instant turns (older) ---\n"
+                state.narrative_summary = (state.narrative_summary or "") + prefix + dropped_text
+
+        async def _persist_after(*, user_turn: str, assistant_turn: str) -> None:
+            if user_turn.strip():
+                state.instant_turns.append(
+                    ConversationTurn(
+                        role=TurnRole.user,
+                        content=user_turn.strip(),
+                        cycle_id=cycle_id,
+                        timestamp=datetime.utcnow(),
+                    )
+                )
+            if assistant_turn.strip():
+                state.instant_turns.append(
+                    ConversationTurn(
+                        role=TurnRole.assistant,
+                        content=assistant_turn.strip(),
+                        cycle_id=cycle_id,
+                        timestamp=datetime.utcnow(),
+                    )
+                )
+            kept2, _dropped2 = trim_instant_turns_to_budget(
+                turns=state.instant_turns,
+                max_tokens=state.budget.max_instant_tokens,
+            )
+            state.instant_turns = kept2
+
+            appended_old = ""
+            if _dropped2:
+                appended_old = render_instant_transcript(_dropped2)
+                if appended_old:
+                    prefix = "\n\n--- Dropped instant turns (older) ---\n"
+                    state.narrative_summary = (state.narrative_summary or "") + prefix + appended_old
+
+            if self.config.enable_phase7_compression:
+                narrative = state.narrative_summary or ""
+                if narrative and self._count_tokens(narrative) > 20000:
+                    model = (
+                        self.config.phase7_summarizer_model
+                        or os.getenv("LLM_MODEL_SUMMARIZER")
+                        or os.getenv("LLM_MODEL_SUMMARISER")
+                        or os.getenv("LLM_MODEL_MANAGER_FAST")
+                        or os.getenv("LLM_MODEL_MANAGER")
+                        or self.config.model
+                    )
+                    cfg = SummarizerConfig(model=model, temperature=0.0)
+                    result = summarize_narrative(
+                        config=cfg,
+                        agent_id=self.agent_id,
+                        run_id=run_id,
+                        existing_narrative_summary=state.narrative_summary or "",
+                        appended_old_transcript=appended_old,
+                        current_watchlist=[w.model_dump(mode="json") for w in state.ledger.watchlist],
+                        current_lessons_last_5=[l.model_dump(mode="json") for l in state.ledger.lessons_last_5],
+                    )
+                    state.narrative_summary = result.new_narrative_summary
+                    state.ledger.watchlist = result.watchlist
+                    state.ledger.lessons_last_5 = result.lessons_last_5
+            await store.save(state)
+
+        return {
+            "state": state,
+            "ledger_json": render_ledger_for_prompt(state.ledger),
+            "narrative_summary": state.narrative_summary or "",
+            "instant_transcript": render_instant_transcript(state.instant_turns),
+            "persist_after": _persist_after,
+        }
 
     def _redact_identity_fields(self, text: str) -> str:
         """Redact model-echoed identity fields from logs/errors for clarity."""
@@ -384,6 +509,7 @@ class BaseTrader:
         position_summary: Optional[Dict[str, Any]] = None,
         memory_snippet: Optional[str] = None,
         extra_instructions: Optional[str] = None,
+        phase7_blocks: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Build system + user messages for the trader."""
         system = {
@@ -448,6 +574,14 @@ class BaseTrader:
             user_parts.append("\nExtra instructions:")
             user_parts.append(extra_instructions)
 
+        if phase7_blocks is not None:
+            user_parts.append("\n=== Grounded Ledger (non-negotiable; facts from Mongo) ===")
+            user_parts.append(phase7_blocks.get("ledger_json") or "")
+            user_parts.append("\n=== Narrative Summary (compressed older history) ===")
+            user_parts.append(phase7_blocks.get("narrative_summary") or "")
+            user_parts.append("\n=== Instant Memory (raw recent QnA transcript) ===")
+            user_parts.append(phase7_blocks.get("instant_transcript") or "")
+
         user = {"role": "user", "content": "\n".join(user_parts)}
         return [system, user]
 
@@ -489,13 +623,97 @@ class BaseTrader:
         extra_instructions: Optional[str] = None,
     ) -> TradeProposal:
         """Run REACT loop and return validated TradeProposal."""
+        run_id = market_brief.get("run_id") if isinstance(market_brief, dict) else None
+        cycle_id = market_brief.get("cycle_id") if isinstance(market_brief, dict) else None
+        phase7 = await self._load_phase7_blocks(run_id=run_id, cycle_id=cycle_id)
+
+        # Deterministically shrink large inbound payloads before prompt assembly.
+        shrunk_market_brief = market_brief
+        try:
+            mb_payload, mb_trunc = self._shrink_json_payload(
+                market_brief, max_tokens=self.config.max_market_brief_tokens
+            )
+            if mb_trunc and isinstance(mb_payload, dict):
+                mb_payload.setdefault("meta", {})
+                if isinstance(mb_payload["meta"], dict):
+                    mb_payload["meta"]["truncated_for_prompt"] = True
+                shrunk_market_brief = mb_payload
+        except Exception:
+            shrunk_market_brief = market_brief
+
+        shrunk_firm_state = firm_state
+        if firm_state is not None:
+            try:
+                fs_payload, fs_trunc = self._shrink_json_payload(
+                    firm_state, max_tokens=self.config.max_firm_state_tokens
+                )
+                shrunk_firm_state = fs_payload if fs_trunc else firm_state
+            except Exception:
+                shrunk_firm_state = firm_state
+
+        shrunk_position_summary = position_summary
+        if position_summary is not None:
+            try:
+                ps_payload, ps_trunc = self._shrink_json_payload(
+                    position_summary, max_tokens=self.config.max_position_summary_tokens
+                )
+                shrunk_position_summary = ps_payload if ps_trunc else position_summary
+            except Exception:
+                shrunk_position_summary = position_summary
+
         messages = self.build_messages(
-            market_brief=market_brief,
-            firm_state=firm_state,
-            position_summary=position_summary,
+            market_brief=shrunk_market_brief,
+            firm_state=shrunk_firm_state,
+            position_summary=shrunk_position_summary,
             memory_snippet=memory_snippet,
             extra_instructions=extra_instructions,
+            phase7_blocks=phase7,
         )
+
+        # Phase 7: enforce overall prompt budget (max_prompt_tokens≈75k) across
+        # pinned/current + ledger + narrative + instant.
+        if phase7 is not None and phase7.get("state") is not None:
+            state = phase7["state"]
+            max_prompt = int(getattr(state.budget, "max_prompt_tokens", 75000))
+            system_text = (messages[0].get("content") or "") if messages else ""
+            user_text = (messages[1].get("content") or "") if len(messages) > 1 else ""
+
+            # Split user text into base portion and Phase 7 blocks so we can trim deterministically.
+            marker = "\n=== Grounded Ledger (non-negotiable; facts from Mongo) ===\n"
+            base_user_text = user_text.split(marker, 1)[0] if marker in user_text else user_text
+
+            try:
+                ledger_view, narrative, kept_turns = enforce_max_prompt_tokens(
+                    system_text=system_text,
+                    base_user_text=base_user_text,
+                    ledger_json=phase7.get("ledger_json") or "",
+                    narrative_summary=phase7.get("narrative_summary") or "",
+                    instant_turns=list(getattr(state, "instant_turns", []) or []),
+                    max_prompt_tokens=max_prompt,
+                )
+                state.narrative_summary = narrative
+                state.instant_turns = kept_turns
+                phase7["ledger_json"] = ledger_view or render_ledger_for_prompt(state.ledger)
+                phase7["narrative_summary"] = state.narrative_summary or ""
+                phase7["instant_transcript"] = render_instant_transcript(state.instant_turns)
+                messages = self.build_messages(
+                    market_brief=shrunk_market_brief,
+                    firm_state=shrunk_firm_state,
+                    position_summary=shrunk_position_summary,
+                    memory_snippet=memory_snippet,
+                    extra_instructions=extra_instructions,
+                    phase7_blocks=phase7,
+                )
+            except Exception:
+                # Hard fallback: drop Phase 7 blocks from the prompt rather than overflow provider limits.
+                messages = self.build_messages(
+                    market_brief=shrunk_market_brief,
+                    firm_state=shrunk_firm_state,
+                    position_summary=shrunk_position_summary,
+                    memory_snippet=memory_snippet,
+                    extra_instructions=extra_instructions,
+                    phase7_blocks=None,
+                )
 
         self.last_messages = list(messages)
         self.last_tool_calls = []
@@ -691,6 +909,15 @@ class BaseTrader:
                 ]
                 proposal = self._parse_trade_proposal(final_content)
                 _enforce_reasoning(proposal)
+                if phase7 is not None and phase7.get("persist_after") is not None:
+                    user_turn = (
+                        f"cycle_id={proposal.cycle_id} "
+                        f"neutral_summary={(market_brief.get('neutral_summary') or '') if isinstance(market_brief, dict) else ''}"
+                    )
+                    await phase7["persist_after"](  # type: ignore[misc]
+                        user_turn=user_turn,
+                        assistant_turn=final_content,
+                    )
                 return proposal
             except Exception as e:
                 last_err = e

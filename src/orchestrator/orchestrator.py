@@ -150,6 +150,10 @@ class OrchestratorConfig:
     manager_timeout_s: float = 120.0
     execute_testnet: bool = True
     extra_trader_instructions: Optional[str] = None
+    # Phase 7: enable persistent memory (raw QnA + narrative summary + grounded ledger)
+    # and allow LLM-based narrative compression.
+    memory_compression: bool = False
+    summarizer_model: str = "google/gemini-2.5-flash-lite"
 
 
 @dataclass(frozen=True)
@@ -268,6 +272,7 @@ class Orchestrator:
         symbols = list(self.config.trading.symbols)
         thin_brief = _thin_market_brief(full_brief, symbols)
         thin_brief["run_id"] = run_id
+        thin_brief["cycle_id"] = cycle_id
 
         tools_ctx = ToolContext(
             mongo=self.mongo,
@@ -292,9 +297,22 @@ class Orchestrator:
         )
 
         # 3) Run traders in parallel (technical-only, no Tavily/news tools)
+        enable_phase7 = bool(self.orchestrator_config.memory_compression)
+        summarizer_model = (
+            os.getenv("LLM_MODEL_SUMMARIZER")
+            or os.getenv("LLM_MODEL_SUMMARISER")
+            or self.orchestrator_config.summarizer_model
+        )
         trader_1 = TechnicalTrader(
             agent_id="tech_trader_1",
-            config=TechnicalTraderConfig(model=trader_model_1, max_tool_calls=6, max_tool_turns=6),
+            config=TechnicalTraderConfig(
+                model=trader_model_1,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
             tools_context=tools_ctx,
             allowed_tools=[
                 "get_market_brief",
@@ -307,7 +325,14 @@ class Orchestrator:
         )
         trader_2 = TechnicalTrader(
             agent_id="tech_trader_2",
-            config=TechnicalTraderConfig(model=trader_model_2, max_tool_calls=6, max_tool_turns=6),
+            config=TechnicalTraderConfig(
+                model=trader_model_2,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
             tools_context=tools_ctx,
             allowed_tools=[
                 "get_market_brief",

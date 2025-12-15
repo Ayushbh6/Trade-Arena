@@ -33,6 +33,7 @@ ORDERS = "orders"
 POSITIONS = "positions"
 PNL_REPORTS = "pnl_reports"
 AUDIT_LOG = "audit_log"
+AGENT_CONTEXT_STATES = "agent_context_states"
 
 # Added for full LLM observability (raw request/response + metadata)
 LLM_CALLS = "llm_calls"
@@ -133,6 +134,15 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
             (("agent_id", ASCENDING), ("timestamp", DESCENDING)),
             (("trace_id", ASCENDING),),
             (("model", ASCENDING), ("timestamp", DESCENDING)),
+        ),
+    ),
+    AGENT_CONTEXT_STATES: CollectionSpec(
+        name=AGENT_CONTEXT_STATES,
+        required_keys=("run_id", "agent_id", "updated_at"),
+        indexes=(
+            (("run_id", ASCENDING), ("agent_id", ASCENDING)),
+            (("run_id", ASCENDING), ("updated_at", DESCENDING)),
+            (("agent_id", ASCENDING), ("updated_at", DESCENDING)),
         ),
     ),
 }

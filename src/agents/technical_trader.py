@@ -97,6 +97,9 @@ class TechnicalTraderConfig:
     temperature: float = 0.0
     max_tool_turns: int = 6
     max_tool_calls: int = 6
+    enable_phase7_context: bool = False
+    enable_phase7_compression: bool = False
+    phase7_summarizer_model: Optional[str] = None
 
 
 class TechnicalTrader:
@@ -130,6 +133,9 @@ class TechnicalTrader:
                 temperature=config.temperature,
                 max_tool_turns=config.max_tool_turns,
                 max_tool_calls=config.max_tool_calls,
+                enable_phase7_context=config.enable_phase7_context,
+                enable_phase7_compression=config.enable_phase7_compression,
+                phase7_summarizer_model=config.phase7_summarizer_model,
                 allowed_tools=allowed_tools,
             ),
             tools_context=tools_context,

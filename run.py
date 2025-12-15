@@ -35,6 +35,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not place orders (still logs proposals/decisions/plan).",
     )
+    p.add_argument(
+        "--memory-compression",
+        action="store_true",
+        help="Enable Phase 7 memory: raw QnA + narrative summary + grounded ledger (and summarizer compression).",
+    )
     return p
 
 
@@ -52,12 +57,16 @@ async def _amain() -> int:
     print(f"[INFO] BINANCE_TESTNET={cfg.binance.testnet} BINANCE_BASE_URL={cfg.binance.base_url}")
     print(f"[INFO] BINANCE_ALLOW_MAINNET={cfg.binance.allow_mainnet}")
     print(f"[INFO] cadence_minutes={args.cadence_minutes or cfg.trading.cadence_minutes}")
+    env_mem = os.getenv("MEMORY_COMPRESSION", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    mem_enabled = bool(args.memory_compression or env_mem)
+    print(f"[INFO] memory_compression={mem_enabled}")
 
     orch = Orchestrator(
         mongo=mongo,
         config=cfg,
         orchestrator_config=OrchestratorConfig(
             execute_testnet=not args.dry_run,
+            memory_compression=mem_enabled,
         ),
     )
 
@@ -76,4 +85,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
