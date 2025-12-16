@@ -241,6 +241,27 @@ def _env_trader_model(agent_id: str) -> Optional[str]:
     return str(v) if v else None
 
 
+def _env_manager_model() -> Optional[str]:
+    # Manager should use the fast model by default.
+    return os.getenv("LLM_MODEL_MANAGER_FAST") or os.getenv("LLM_MODEL_MANAGER")
+
+
+def _all_tool_names() -> List[str]:
+    # Derive the complete tool registry (manager has access=all).
+    try:  # pragma: no cover
+        from src.agents.tools import ToolContext, build_tool_specs
+
+        specs = build_tool_specs(ToolContext(), allowed_tools=None)
+        out: List[str] = []
+        for spec in specs:
+            name = getattr(spec, "name", None)
+            if isinstance(name, str) and name:
+                out.append(name)
+        return sorted(set(out))
+    except Exception:
+        return []
+
+
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
@@ -384,7 +405,7 @@ def create_app() -> FastAPI:
                 if env_m:
                     trader_models[aid] = env_m
 
-        manager_model = selected.get("manager_model") or os.getenv("LLM_MODEL_MANAGER")
+        manager_model = selected.get("manager_model") or _env_manager_model()
 
         tools_map = _allowed_tools_by_agent()
         out: List[Dict[str, Any]] = []
@@ -406,7 +427,10 @@ def create_app() -> FastAPI:
                 "role": "manager",
                 "llm_model_full": manager_model,
                 "llm_model_name": _short_model_name(manager_model),
-                "tools": tools_map.get("manager"),
+                "tools": {
+                    **(tools_map.get("manager") or {}),
+                    "tools": [{"name": t, "label": _tool_display_name(t)} for t in _all_tool_names()],
+                },
             }
         )
 

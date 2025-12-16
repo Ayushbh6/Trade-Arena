@@ -23,10 +23,9 @@ Build an open-source benchmark and platform for AI-native trading, where:
 ┌─────────────────────────────────────────────────────────────┐
 │                    AI Trading Office                         │
 ├──────────────┬──────────────┬──────────────┬──────────────┤
-│   Macro/News  │  On-Chain/   │  Technical/  │  Structure/  │
-│   Trader      │  Flows       │  Quant       │  Funding     │
-│  Agent 1      │  Trader      │  Trader      │  Trader      │
-│               │  Agent 2     │  Agent 3     │  Agent 4     │
+│   Technical   │  Technical   │   Macro/     │  Structure/  │
+│   Agent 1     │  Agent 2     │  News Agent  │  Funding     │
+│               │              │              │  Agent       │
 └──────────────┴──────────────┴──────────────┴──────────────┘
                               │
                               ▼
@@ -101,7 +100,7 @@ cp .env.example .env
 # Edit .env with your API keys
 ```
 
-### Required API Keys
+### Required Environment Variables
 
 ```bash
 # LLM Access (OpenRouter recommended)
@@ -112,9 +111,10 @@ LLM_MODEL_TRADER_2=deepseek/deepseek-chat
 LLM_MODEL_TRADER_3=deepseek/deepseek-chat  # macro/news trader
 LLM_MODEL_TRADER_4=deepseek/deepseek-chat  # market-structure/funding trader
 LLM_MODEL_MANAGER=deepseek/deepseek-chat
+LLM_MODEL_MANAGER_FAST=deepseek/deepseek-chat  # recommended (Manager is a latency bottleneck)
 
 # MongoDB
-MONGODB_URI=mongodb://localhost:27017
+MONGODB_URL=mongodb://localhost:27017
 
 # Binance Testnet
 BINANCE_TESTNET=true
@@ -190,8 +190,8 @@ Expected output:
 # Start the main trading loop
 python run.py
 
-# Or with custom config
-python run.py --config configs/production.yaml
+# One cycle only (useful for seeding the dashboard)
+python run.py --once --dry-run --run-id demo_1
 ```
 
 ## 🖥️ Dashboard (Phase 11)
@@ -204,7 +204,7 @@ This repo uses a **two-service** setup in production (recommended for Railway):
 
 ```bash
 source venv/bin/activate
-export MONGODB_URI="mongodb://localhost:27017"
+export MONGODB_URL="mongodb://localhost:27017"
 
 # Local/dev: open CORS, auth off
 export UI_ALLOWED_ORIGINS="*"
@@ -224,6 +224,8 @@ npm install
 npm run dev
 ```
 
+Open the UI at `http://localhost:5173` (API is `http://localhost:8000`).
+
 ### Hosted (Railway) auth toggle
 
 Set these env vars on the **API service**:
@@ -232,6 +234,11 @@ Set these env vars on the **API service**:
 - `UI_BASIC_AUTH_PASS=trader@123`
 - `UI_TOKEN_SECRET=<random long secret>`
 - `UI_ALLOWED_ORIGINS=<your UI domain>`
+
+### Railway production commands
+
+- **API service start command:** `python -m src.ui.serve --host 0.0.0.0 --port $PORT`
+- **UI service start command:** `npm run build && npm run preview -- --host 0.0.0.0 --port $PORT`
 
 ## 📖 Documentation
 

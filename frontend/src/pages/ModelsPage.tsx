@@ -63,10 +63,19 @@ export default function ModelsPage() {
     if (!selectedModel.tools) return null;
     if (!Array.isArray(selectedModel.tools)) {
       const max = (selectedModel.tools as any).max_tool_calls;
+      const toolList = (selectedModel.tools as any).tools as ToolInfo[] | undefined;
       return (
         <div className="mt-2 flex flex-wrap gap-2">
           <Badge>All Tools</Badge>
           {typeof max === "number" ? <Badge>{max} calls</Badge> : null}
+          {Array.isArray(toolList) && toolList.length ? (
+            <>
+              {toolList.slice(0, 12).map((t) => (
+                <Badge key={t.name}>{t.label}</Badge>
+              ))}
+              {toolList.length > 12 ? <Badge>+{toolList.length - 12} more</Badge> : null}
+            </>
+          ) : null}
         </div>
       );
     }
