@@ -19,6 +19,7 @@ from src.data.audit import AuditContext, AuditManager
 from src.orchestrator.orchestrator import Orchestrator
 from src.portfolio.portfolio import PortfolioManager
 from src.portfolio.reporting import ReportingEngine
+from src.orchestrator.weekly_review import run_weekly_review
 
 
 def _utc_now() -> datetime:
@@ -32,6 +33,10 @@ def _cycle_id() -> str:
 @dataclass(frozen=True)
 class MainLoopConfig:
     cadence_minutes: int = 6
+    auto_weekly_review: bool = False
+    weekly_review_day: str = "mon"  # UTC
+    weekly_review_hour: int = 0
+    weekly_review_minute: int = 5
 
 
 async def run_once(*, orchestrator: Orchestrator, run_id: str, cycle_id: Optional[str] = None) -> None:
@@ -88,10 +93,30 @@ async def run_forever(
         coalesce=True,
     )
 
+    async def _weekly_review_job() -> None:
+        await run_weekly_review(mongo=orchestrator.mongo, run_id=run_id, cfg=orchestrator.config)
+
+    if bool(cfg.auto_weekly_review):
+        # Cron trigger: defaults to Monday 00:05 UTC.
+        scheduler.add_job(
+            _weekly_review_job,
+            trigger="cron",
+            day_of_week=str(cfg.weekly_review_day),
+            hour=int(cfg.weekly_review_hour),
+            minute=int(cfg.weekly_review_minute),
+            id="weekly_review",
+            max_instances=1,
+            coalesce=True,
+        )
+
     audit = AuditManager(orchestrator.mongo)
     await audit.log(
         "main_loop_start",
-        {"run_id": run_id, "cadence_minutes": cfg.cadence_minutes},
+        {
+            "run_id": run_id,
+            "cadence_minutes": cfg.cadence_minutes,
+            "auto_weekly_review": bool(cfg.auto_weekly_review),
+        },
         ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
     )
 
@@ -108,4 +133,3 @@ async def run_forever(
 
 
 __all__ = ["MainLoopConfig", "run_once", "run_forever"]
-

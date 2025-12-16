@@ -46,10 +46,16 @@ def openrouter_client(
     """Yield a configured OpenRouter client."""
     key = _get_api_key(api_key)
     kwargs: Dict[str, Any] = {"api_key": key}
+    if timeout_s is None:
+        try:
+            timeout_s = float(os.getenv("OPENROUTER_TIMEOUT_S", "").strip() or 0) or None
+        except Exception:
+            timeout_s = None
     if timeout_s is not None:
-        kwargs["timeout"] = timeout_s
-    if max_retries is not None:
-        kwargs["max_retries"] = max_retries
+        # OpenRouter SDK expects milliseconds.
+        kwargs["timeout_ms"] = int(timeout_s * 1000)
+    # Note: OpenRouter SDK (v0.1.x) does not accept `max_retries` on the client.
+    # Retries (if desired) are handled in our wrapper send() loop instead.
 
     with OpenRouter(**kwargs) as client:
         yield client
@@ -64,10 +70,16 @@ async def openrouter_client_async(
     """Async variant of openrouter_client."""
     key = _get_api_key(api_key)
     kwargs: Dict[str, Any] = {"api_key": key}
+    if timeout_s is None:
+        try:
+            timeout_s = float(os.getenv("OPENROUTER_TIMEOUT_S", "").strip() or 0) or None
+        except Exception:
+            timeout_s = None
     if timeout_s is not None:
-        kwargs["timeout"] = timeout_s
-    if max_retries is not None:
-        kwargs["max_retries"] = max_retries
+        # OpenRouter SDK expects milliseconds.
+        kwargs["timeout_ms"] = int(timeout_s * 1000)
+    # Note: OpenRouter SDK (v0.1.x) does not accept `max_retries` on the client.
+    # Retries (if desired) are handled in our wrapper send() loop instead.
 
     async with OpenRouter(**kwargs) as client:
         yield client
@@ -151,8 +163,24 @@ def chat_completion_raw(
         sp = dict(send_params)
         if rf_override is not None:
             sp["response_format"] = rf_override
-        with openrouter_client(api_key=api_key) as client:
-            return client.chat.send(model=model, messages=msgs, stream=False, **sp)
+        # Wrapper-level retries to smooth over transient provider errors.
+        retries = 0
+        try:
+            retries = int(os.getenv("OPENROUTER_MAX_RETRIES", "").strip() or 0)
+        except Exception:
+            retries = 0
+        attempts = max(1, 1 + max(0, retries))
+
+        last_err: Optional[Exception] = None
+        for _ in range(attempts):
+            try:
+                with openrouter_client(api_key=api_key) as client:
+                    return client.chat.send(model=model, messages=msgs, stream=False, **sp)
+            except Exception as e:  # pragma: no cover
+                last_err = e
+                continue
+        assert last_err is not None
+        raise last_err
 
     try:
         return _send(messages)

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from Utils.openrouter import chat_completion_raw
 from src.agents.memory.ledger import LessonItem, WatchlistItem
+from src.agents.memory.ledger_updates import LedgerUpdate
 from src.data.mongo import jsonify
 
 
@@ -25,8 +26,13 @@ class SummarizeResult(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
     new_narrative_summary: str = Field(..., min_length=1)
-    watchlist: List[WatchlistItem] = Field(default_factory=list, max_length=50)
-    lessons_last_5: List[LessonItem] = Field(default_factory=list, max_length=5)
+    # Spec: summarizer emits structured updates for the (soft) ledger sections.
+    # Facts are sourced from Mongo and never updated by the summarizer.
+    ledger_updates: List[LedgerUpdate] = Field(default_factory=list)
+
+    # Back-compat: older implementation returned full lists; still accepted.
+    watchlist: Optional[List[WatchlistItem]] = Field(default=None, max_length=50)
+    lessons_last_5: Optional[List[LessonItem]] = Field(default=None, max_length=5)
     notes: Optional[str] = None
 
 
@@ -59,13 +65,14 @@ def summarize_narrative(
             "You are a memory summarizer for a long-running trading agent.\n"
             "Task:\n"
             "- Compress older chat history into a compact narrative summary.\n"
-            "- Update ONLY the soft ledger sections: watchlist and lessons_last_5.\n"
+            "- Propose structured ledger updates for ONLY the soft ledger sections: watchlist and lessons_last_5.\n"
             "Hard rules:\n"
             "- Do NOT modify any factual state like positions/balances/exposure.\n"
             "- Keep watchlist to <=50 items and lessons_last_5 to exactly the most relevant 5 or fewer.\n"
             "- Each watchlist item must have a stable item_id (string).\n"
             "- Each lesson must have an item_id and a clear 'lesson' sentence.\n"
-            "- Output ONLY JSON matching the provided schema.\n"
+            "- Use ledger_updates operations (op_type in {watchlist_upsert, watchlist_remove, lesson_upsert, lesson_remove}).\n"
+            "- Output ONLY JSON matching the provided schema. No markdown. No extra keys.\n"
         ),
     }
 
@@ -106,4 +113,3 @@ def summarize_narrative(
 
 
 __all__ = ["SummarizerConfig", "SummarizeResult", "summarize_narrative"]
-

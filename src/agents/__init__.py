@@ -15,4 +15,9 @@ from src.agents.schemas import (  # noqa: F401
     DecisionItem,
 )
 
-from src.agents.manager import ManagerAgent, ManagerConfig  # noqa: F401
+try:  # pragma: no cover
+    # Optional convenience exports (may require heavier deps like OpenRouter SDK).
+    from src.agents.manager import ManagerAgent, ManagerConfig  # noqa: F401
+except Exception:  # pragma: no cover
+    ManagerAgent = None  # type: ignore[assignment]
+    ManagerConfig = None  # type: ignore[assignment]

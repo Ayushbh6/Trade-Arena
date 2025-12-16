@@ -25,6 +25,7 @@ from src.agents.memory.context_manager import (
 from src.agents.memory.reground import rebuild_ledger_facts_from_mongo
 from src.agents.memory.state_store import ContextStateStore
 from src.agents.memory.summarizer import SummarizerConfig, summarize_narrative
+from src.agents.memory.ledger_updates import apply_ledger_updates
 from src.data.mongo import jsonify
 from src.agents.schemas import (
     DecisionType,
@@ -75,6 +76,58 @@ class BaseTraderConfig:
 class BaseTrader:
     """Common REACT loop for trader agents."""
 
+    async def _audit_tool_call(
+        self,
+        *,
+        run_id: Optional[str],
+        cycle_id: Optional[str],
+        tool_name: str,
+        args: Dict[str, Any],
+        raw_result: Any,
+        prompt_payload: Any,
+        truncated_for_prompt: bool,
+        error: Optional[str],
+    ) -> None:
+        """Persist tool call inputs/outputs into Mongo audit_log (system-of-record)."""
+        if not run_id:
+            return
+        if self.tools_context is None or self.tools_context.mongo is None:
+            return
+        mongo = self.tools_context.mongo
+
+        # Mongo has a 16MB document limit. Store a bounded payload for safety.
+        stored_result, stored_truncated = self._shrink_json_payload(
+            jsonify(raw_result), max_tokens=50000
+        )
+        stored_prompt_payload, stored_prompt_truncated = self._shrink_json_payload(
+            jsonify(prompt_payload), max_tokens=15000
+        )
+
+        payload: Dict[str, Any] = {
+            "cycle_id": cycle_id,
+            "tool": {"name": tool_name, "args": jsonify(args)},
+            "result": {
+                "error": error,
+                "stored_truncated": bool(stored_truncated),
+                "data": stored_result,
+            },
+            "prompt_payload": {
+                "truncated_for_prompt": bool(truncated_for_prompt),
+                "stored_truncated": bool(stored_prompt_truncated),
+                "data": stored_prompt_payload,
+            },
+        }
+        try:
+            await mongo.log_audit_event(
+                "tool_call",
+                payload,
+                run_id=run_id,
+                agent_id=self.agent_id,
+            )
+        except Exception:
+            # Best-effort: never fail the agent loop due to audit logging.
+            return
+
     async def _load_phase7_blocks(
         self,
         *,
@@ -110,6 +163,10 @@ class BaseTrader:
             if dropped_text:
                 prefix = "\n\n--- Dropped instant turns (older) ---\n"
                 state.narrative_summary = (state.narrative_summary or "") + prefix + dropped_text
+
+        # Persist immediately so Phase 7 state exists even if the cycle later errors/hangs
+        # during LLM/tool calls. Facts were just re-grounded from Mongo above.
+        await store.save(state)
 
         async def _persist_after(*, user_turn: str, assistant_turn: str) -> None:
             if user_turn.strip():
@@ -165,8 +222,13 @@ class BaseTrader:
                         current_lessons_last_5=[l.model_dump(mode="json") for l in state.ledger.lessons_last_5],
                     )
                     state.narrative_summary = result.new_narrative_summary
-                    state.ledger.watchlist = result.watchlist
-                    state.ledger.lessons_last_5 = result.lessons_last_5
+                    if getattr(result, "ledger_updates", None):
+                        apply_ledger_updates(ledger=state.ledger, updates=result.ledger_updates)
+                    # Back-compat: allow full soft-state replacement if provided.
+                    if getattr(result, "watchlist", None) is not None:
+                        state.ledger.watchlist = result.watchlist or []
+                    if getattr(result, "lessons_last_5", None) is not None:
+                        state.ledger.lessons_last_5 = result.lessons_last_5 or []
             await store.save(state)
 
         return {
@@ -613,6 +675,27 @@ class BaseTrader:
                 args_obj = {}
         return str(tc_id), str(fn_name), args_obj
 
+    def _tool_usage_summary(self) -> str:
+        """Compact summary of tools used in the last decide() call."""
+        calls = list(self.last_tool_calls or [])
+        if not calls:
+            return "tool_calls=0 tools=[]"
+        names: List[str] = []
+        for c in calls:
+            if isinstance(c, dict) and c.get("name"):
+                names.append(str(c["name"]))
+        # Keep order but de-dup.
+        seen: set[str] = set()
+        unique: List[str] = []
+        for n in names:
+            if n in seen:
+                continue
+            seen.add(n)
+            unique.append(n)
+        # Keep it short for prompt safety.
+        unique = unique[:12]
+        return f"tool_calls={len(calls)} tools={unique}"
+
     async def decide(
         self,
         *,
@@ -800,13 +883,16 @@ class BaseTrader:
                 fn_name = tc["function"]["name"]
                 args = json.loads(tc["function"].get("arguments") or "{}")
                 tool_fn = self._tool_dispatch.get(fn_name)
+                error: Optional[str] = None
                 if tool_fn is None:
-                    tool_out = {"error": f"unknown tool: {fn_name}"}
+                    error = f"unknown tool: {fn_name}"
+                    tool_out = {"error": error}
                 else:
                     try:
                         tool_out = await tool_fn(**args)  # type: ignore[misc]
                     except Exception as e:
-                        tool_out = {"error": str(e)}
+                        error = str(e)
+                        tool_out = {"error": error}
 
                 payload, truncated = self._shrink_json_payload(
                     tool_out, max_tokens=self.config.max_tool_output_tokens
@@ -821,6 +907,17 @@ class BaseTrader:
                         ),
                         "data": payload,
                     }
+
+                await self._audit_tool_call(
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    tool_name=fn_name,
+                    args=args if isinstance(args, dict) else {},
+                    raw_result=tool_out,
+                    prompt_payload=payload,
+                    truncated_for_prompt=truncated,
+                    error=error,
+                )
 
                 messages.append(
                     {
@@ -910,8 +1007,12 @@ class BaseTrader:
                 proposal = self._parse_trade_proposal(final_content)
                 _enforce_reasoning(proposal)
                 if phase7 is not None and phase7.get("persist_after") is not None:
+                    # Persist a compact tool usage summary *before* the final JSON to avoid
+                    # polluting memory with full tool transcripts while retaining traceability.
+                    tool_summary = self._tool_usage_summary()
                     user_turn = (
                         f"cycle_id={proposal.cycle_id} "
+                        f"{tool_summary} "
                         f"neutral_summary={(market_brief.get('neutral_summary') or '') if isinstance(market_brief, dict) else ''}"
                     )
                     await phase7["persist_after"](  # type: ignore[misc]

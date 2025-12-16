@@ -34,6 +34,7 @@ POSITIONS = "positions"
 PNL_REPORTS = "pnl_reports"
 AUDIT_LOG = "audit_log"
 AGENT_CONTEXT_STATES = "agent_context_states"
+LOCKS = "locks"
 
 # Added for full LLM observability (raw request/response + metadata)
 LLM_CALLS = "llm_calls"
@@ -143,6 +144,14 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
             (("run_id", ASCENDING), ("agent_id", ASCENDING)),
             (("run_id", ASCENDING), ("updated_at", DESCENDING)),
             (("agent_id", ASCENDING), ("updated_at", DESCENDING)),
+        ),
+    ),
+    LOCKS: CollectionSpec(
+        name=LOCKS,
+        required_keys=("_id", "expires_at", "owner"),
+        indexes=(
+            (("expires_at", ASCENDING),),
+            (("owner", ASCENDING),),
         ),
     ),
 }

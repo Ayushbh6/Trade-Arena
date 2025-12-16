@@ -59,14 +59,19 @@ def main() -> None:
     )
 
     assert res.new_narrative_summary and isinstance(res.new_narrative_summary, str)
-    assert isinstance(res.watchlist, list)
-    assert isinstance(res.lessons_last_5, list)
-    assert len(res.watchlist) <= 50
-    assert len(res.lessons_last_5) <= 5
+    assert isinstance(res.ledger_updates, list)
+    # Back-compat: some models may also return full lists; if present, they must respect caps.
+    if res.watchlist is not None:
+        assert isinstance(res.watchlist, list)
+        assert len(res.watchlist) <= 50
+    if res.lessons_last_5 is not None:
+        assert isinstance(res.lessons_last_5, list)
+        assert len(res.lessons_last_5) <= 5
 
     print("[OK] new_narrative_summary length:", len(res.new_narrative_summary))
-    print("[OK] watchlist items:", len(res.watchlist))
-    print("[OK] lessons_last_5:", len(res.lessons_last_5))
+    print("[OK] ledger_updates:", len(res.ledger_updates))
+    print("[OK] watchlist items:", len(res.watchlist or []))
+    print("[OK] lessons_last_5:", len(res.lessons_last_5 or []))
     print("[PASS] Narrative compression checks passed.")
 
 
@@ -75,4 +80,3 @@ if __name__ == "__main__":
         main()
     except Exception:
         sys.exit(1)
-

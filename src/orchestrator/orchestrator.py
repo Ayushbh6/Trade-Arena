@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.agents.manager import ManagerAgent, ManagerConfig
 from src.agents.schemas import ManagerDecision, TradeProposal, DecisionType
+from src.agents.macro_trader import MacroTrader, MacroTraderConfig
+from src.agents.structure_trader import StructureTrader, StructureTraderConfig
 from src.agents.technical_trader import TechnicalTrader, TechnicalTraderConfig
 from src.agents.tools import ToolContext
 from src.agents.tools.market_tools import get_firm_state
@@ -36,6 +38,7 @@ from src.execution.schemas import ExecutionStatus
 from src.features.market_state import MarketStateBuilder
 from src.portfolio.portfolio import PortfolioManager
 from src.portfolio.reporting import ReportingEngine
+from src.portfolio.trust import load_trust_scores
 from src.risk.validator import validate_proposal
 
 
@@ -146,8 +149,9 @@ def _parse_agent_from_client_id(client_order_id: str) -> Optional[str]:
 
 @dataclass(frozen=True)
 class OrchestratorConfig:
-    trader_timeout_s: float = 120.0
-    manager_timeout_s: float = 120.0
+    # Total wall-clock budget for each trader/manager task (covers multi-turn tool calls).
+    trader_timeout_s: float = 180.0
+    manager_timeout_s: float = 180.0
     execute_testnet: bool = True
     extra_trader_instructions: Optional[str] = None
     # Phase 7: enable persistent memory (raw QnA + narrative summary + grounded ledger)
@@ -183,16 +187,18 @@ class Orchestrator:
         self.config = config or load_config()
         self.orchestrator_config = orchestrator_config or OrchestratorConfig()
 
-    def _models(self) -> Tuple[str, str, str]:
+    def _models(self) -> Tuple[str, str, str, str, str]:
         trader_1 = os.getenv("LLM_MODEL_TRADER_1") or "deepseek/deepseek-chat"
         trader_2 = os.getenv("LLM_MODEL_TRADER_2") or trader_1
+        trader_3 = os.getenv("LLM_MODEL_TRADER_3") or trader_1
+        trader_4 = os.getenv("LLM_MODEL_TRADER_4") or trader_1
         manager = (
             os.getenv("LLM_MODEL_MANAGER_FAST")
             or os.getenv("LLM_MODEL_MANAGER")
             or self.config.models.manager_model_fast
             or self.config.models.manager_model
         )
-        return trader_1, trader_2, manager
+        return trader_1, trader_2, trader_3, trader_4, manager
 
     async def _persist_trade_proposal(self, proposal: TradeProposal) -> Optional[str]:
         doc = jsonify(proposal.model_dump(mode="json"))
@@ -212,7 +218,7 @@ class Orchestrator:
     async def _run_trader(
         self,
         *,
-        trader: TechnicalTrader,
+        trader: Any,
         thin_brief: Dict[str, Any],
         firm_state: Dict[str, Any],
         cycle_id: str,
@@ -285,18 +291,23 @@ class Orchestrator:
         # 2) Firm state for all downstream steps
         firm_state_dict = await asyncio.wait_for(get_firm_state(context=tools_ctx), timeout=15.0)
 
-        trader_model_1, trader_model_2, manager_model = self._models()
+        trader_model_1, trader_model_2, trader_model_3, trader_model_4, manager_model = self._models()
         await audit.log(
             "models_selected",
             {
                 "cycle_id": cycle_id,
-                "trader_models": {"tech_trader_1": trader_model_1, "tech_trader_2": trader_model_2},
+                "trader_models": {
+                    "tech_trader_1": trader_model_1,
+                    "tech_trader_2": trader_model_2,
+                    "macro_trader_1": trader_model_3,
+                    "structure_trader_1": trader_model_4,
+                },
                 "manager_model": manager_model,
             },
             ctx=audit_ctx,
         )
 
-        # 3) Run traders in parallel (technical-only, no Tavily/news tools)
+        # 3) Run traders in parallel
         enable_phase7 = bool(self.orchestrator_config.memory_compression)
         summarizer_model = (
             os.getenv("LLM_MODEL_SUMMARIZER")
@@ -344,6 +355,50 @@ class Orchestrator:
             ],
         )
 
+        macro_1 = MacroTrader(
+            agent_id="macro_trader_1",
+            config=MacroTraderConfig(
+                model=trader_model_3,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_recent_news",
+                "tavily_search",
+                "get_position_summary",
+                "get_firm_state",
+                "query_memory",
+            ],
+        )
+
+        structure_1 = StructureTrader(
+            agent_id="structure_trader_1",
+            config=StructureTraderConfig(
+                model=trader_model_4,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_funding_oi_history",
+                "get_orderbook_top",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+                "query_memory",
+            ],
+        )
+
         # Initialize portfolios if needed
         if self.portfolio_manager:
             budget_notional = float(self.config.risk.agent_budget_notional_usd)
@@ -351,15 +406,21 @@ class Orchestrator:
                 self.portfolio_manager.initialize_agent(trader_1.agent_id, budget_notional)
             if trader_2.agent_id not in self.portfolio_manager.portfolios:
                 self.portfolio_manager.initialize_agent(trader_2.agent_id, budget_notional)
+            if macro_1.agent_id not in self.portfolio_manager.portfolios:
+                self.portfolio_manager.initialize_agent(macro_1.agent_id, budget_notional)
+            if structure_1.agent_id not in self.portfolio_manager.portfolios:
+                self.portfolio_manager.initialize_agent(structure_1.agent_id, budget_notional)
 
         # Ensure firm budgets map aligns with actual agent_ids used in this run.
         budgets = dict(firm_state_dict.get("agent_budgets") or {})
         budgets[trader_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
         budgets[trader_2.agent_id] = float(self.config.risk.agent_budget_notional_usd)
+        budgets[macro_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
+        budgets[structure_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
         firm_state_dict["agent_budgets"] = budgets
         firm_state_dict["capital_usdt"] = float(sum(budgets.values())) if budgets else firm_state_dict.get("capital_usdt")
 
-        async def _safe_trader(trader: TechnicalTrader) -> TradeProposal:
+        async def _safe_trader(trader: Any, *, model: str) -> TradeProposal:
             try:
                 return await asyncio.wait_for(
                     self._run_trader(
@@ -371,7 +432,6 @@ class Orchestrator:
                     timeout=self.orchestrator_config.trader_timeout_s,
                 )
             except Exception as e:  # pylint: disable=broad-exception-caught
-                model = trader_model_1 if trader.agent_id == "tech_trader_1" else trader_model_2
                 await audit.log(
                     "trader_error",
                     {
@@ -393,17 +453,20 @@ class Orchestrator:
                     notes=f"Trader error; forced no-trade. error={e}",
                 )
 
+        traders: List[Tuple[Any, str]] = [
+            (trader_1, trader_model_1),
+            (trader_2, trader_model_2),
+            (macro_1, trader_model_3),
+            (structure_1, trader_model_4),
+        ]
         proposals: List[TradeProposal] = list(
-            await asyncio.gather(_safe_trader(trader_1), _safe_trader(trader_2))
+            await asyncio.gather(*[_safe_trader(t, model=m) for (t, m) in traders])
         )
         await audit.log(
             "tool_results_summary_traders",
             {
                 "cycle_id": cycle_id,
-                "agents": {
-                    trader_1.agent_id: _summarize_tool_messages(trader_1.last_messages),
-                    trader_2.agent_id: _summarize_tool_messages(trader_2.last_messages),
-                },
+                "agents": {t.agent_id: _summarize_tool_messages(t.last_messages) for (t, _m) in traders},
             },
             ctx=audit_ctx,
         )
@@ -412,14 +475,8 @@ class Orchestrator:
             {
                 "cycle_id": cycle_id,
                 "agents": {
-                    trader_1.agent_id: {
-                        "tool_calls": len(trader_1.last_tool_calls),
-                        "tools": [c.get("name") for c in trader_1.last_tool_calls],
-                    },
-                    trader_2.agent_id: {
-                        "tool_calls": len(trader_2.last_tool_calls),
-                        "tools": [c.get("name") for c in trader_2.last_tool_calls],
-                    },
+                    t.agent_id: {"tool_calls": len(t.last_tool_calls), "tools": [c.get("name") for c in t.last_tool_calls]}
+                    for (t, _m) in traders
                 },
             },
             ctx=audit_ctx,
@@ -458,10 +515,21 @@ class Orchestrator:
 
         manager_decision: Optional[ManagerDecision] = None
         try:
+            trust_scores = await load_trust_scores(
+                mongo=self.mongo,
+                agent_ids=[p.agent_id for p in proposals],
+                default_trust=50.0,
+            )
+            await audit.log(
+                "trust_scores_loaded",
+                {"cycle_id": cycle_id, "trust_scores": trust_scores},
+                ctx=audit_ctx,
+            )
             manager_decision = await asyncio.wait_for(
                 manager.decide(
                     proposals=[p.model_dump(mode="json") for p in proposals],
                     compliance_reports=[r.model_dump(mode="json") for r in compliance_reports],
+                    trust_scores=trust_scores,
                     firm_state=firm_state_dict,
                     positions_by_agent=None,
                     run_id=run_id,

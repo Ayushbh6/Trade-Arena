@@ -142,6 +142,21 @@ class DecisionItem(BaseModel):
     notes: Optional[str] = None
 
 
+class TrustDelta(BaseModel):
+    """Manager-suggested trust delta (informational only; allocator decides)."""
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=True)
+
+    agent_id: str = Field(..., description="Agent identifier.")
+    delta: float = Field(
+        ...,
+        ge=-1.0,
+        le=1.0,
+        description="Suggested trust delta in normalized units [-1, 1].",
+    )
+    reason: str = Field(..., min_length=1, description="Short justification.")
+
+
 class ManagerDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", use_enum_values=True)
 
@@ -155,6 +170,10 @@ class ManagerDecision(BaseModel):
         None, description="Manager reasoning summary for approvals/vetoes/resizes."
     )
     firm_notes: Optional[str] = None
+    trust_deltas: List[TrustDelta] = Field(
+        default_factory=list,
+        description="Optional trust delta suggestions for the weekly allocator (informational only).",
+    )
 
 
 T = TypeVar("T", bound=BaseModel)

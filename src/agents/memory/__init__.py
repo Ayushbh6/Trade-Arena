@@ -32,3 +32,12 @@ from src.agents.memory.summarizer import (  # noqa: F401
     SummarizeResult,
     summarize_narrative,
 )
+
+from src.agents.memory.ledger_updates import (  # noqa: F401
+    LedgerUpdate,
+    LessonRemove,
+    LessonUpsert,
+    WatchlistRemove,
+    WatchlistUpsert,
+    apply_ledger_updates,
+)

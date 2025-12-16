@@ -33,6 +33,7 @@ Your job is to maximize **firm-level risk-adjusted returns**, while enforcing **
 - One `TradeProposal` per trader for the current cycle
 - A deterministic `ComplianceReport` per proposal (risk engine output)
 - Firm state + risk limits + agent budgets
+- Current `trust_scores` per agent (allocator signal; higher = more trusted)
 - Current positions summaries (if provided)
 
 ---
@@ -60,6 +61,7 @@ Your job is to maximize **firm-level risk-adjusted returns**, while enforcing **
 - Final response MUST be ONLY a `ManagerDecision` JSON object matching schema.
 - No markdown, no extra text, no code fences.
 - You MUST include a short reasoning summary in top-level `notes` (even if no decisions).
+- `trust_deltas` is OPTIONAL and informational only (weekly allocator may consider it).
 """
 
 
@@ -198,6 +200,7 @@ class ManagerAgent:
             "- timestamp: RFC3339/ISO datetime string (UTC)\n"
             "- decisions: array of DecisionItem objects\n"
             "- notes: string|null (REQUIRED in practice; must explain decisions)\n\n"
+            "- trust_deltas: array of TrustDelta objects (optional; may be empty)\n\n"
             "DecisionItem keys:\n"
             "- agent_id: string|null\n"
             "- trade_index: int|null\n"
@@ -206,15 +209,66 @@ class ManagerAgent:
             "- approved_size_usdt: number|null\n"
             "- approved_leverage: number|null\n"
             "- notes: string|null\n"
+            "\nTrustDelta keys:\n"
+            "- agent_id: string\n"
+            "- delta: number in [-1, 1]\n"
+            "- reason: string\n"
             "Rules:\n"
             "- Do NOT add any keys beyond those listed.\n"
         )
+
+    async def _audit_tool_call(
+        self,
+        *,
+        run_id: Optional[str],
+        cycle_id: Optional[str],
+        tool_name: str,
+        args: Dict[str, Any],
+        result: Any,
+        error: Optional[str],
+    ) -> None:
+        if not run_id:
+            return
+        mongo = getattr(self.tools_context, "mongo", None)
+        if mongo is None:
+            return
+
+        # Best-effort size guard for Mongo (16MB max doc).
+        try:
+            raw = json.dumps(jsonify(result), ensure_ascii=False, default=str)
+            if len(raw) > 200_000:
+                stored: Any = {
+                    "_omitted": True,
+                    "reason": "result_too_large_for_audit_event",
+                    "char_len": len(raw),
+                    "head": raw[:50_000],
+                    "tail": raw[-50_000:],
+                }
+            else:
+                stored = jsonify(result)
+        except Exception:
+            stored = {"_omitted": True, "reason": "json_dump_failed"}
+
+        try:
+            await mongo.log_audit_event(
+                "tool_call",
+                {
+                    "cycle_id": cycle_id,
+                    "tool": {"name": tool_name, "args": jsonify(args)},
+                    "result": {"error": error, "data": stored},
+                },
+                run_id=run_id,
+                agent_id=self.manager_id,
+            )
+        except Exception:
+            return
 
     async def decide(
         self,
         *,
         proposals: List[Dict[str, Any]],
         compliance_reports: List[Dict[str, Any]],
+        trust_scores: Optional[Dict[str, float]] = None,
         firm_state: Optional[Dict[str, Any]] = None,
         positions_by_agent: Optional[Dict[str, Any]] = None,
         run_id: Optional[str] = None,
@@ -245,6 +299,10 @@ class ManagerAgent:
         user_parts.append(
             json.dumps(jsonify(compliance_reports), ensure_ascii=False, default=str)
         )
+
+        if trust_scores is not None:
+            user_parts.append("\nTrust scores (allocator signal; higher = more trusted):")
+            user_parts.append(json.dumps(jsonify(trust_scores), ensure_ascii=False, default=str))
 
         if firm_state is not None:
             user_parts.append("\nFirm state:")
@@ -319,13 +377,25 @@ class ManagerAgent:
                     args = {}
 
                 tool_fn = self._tool_dispatch.get(fn_name)
+                error: Optional[str] = None
                 if tool_fn is None:
-                    tool_out = {"error": f"unknown tool: {fn_name}"}
+                    error = f"unknown tool: {fn_name}"
+                    tool_out = {"error": error}
                 else:
                     try:
                         tool_out = await tool_fn(**args)  # type: ignore[misc]
                     except Exception as e:
-                        tool_out = {"error": str(e)}
+                        error = str(e)
+                        tool_out = {"error": error}
+
+                await self._audit_tool_call(
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    tool_name=str(fn_name),
+                    args=args if isinstance(args, dict) else {},
+                    result=tool_out,
+                    error=error,
+                )
 
                 messages.append(
                     {
@@ -413,4 +483,3 @@ class ManagerAgent:
 
 
 __all__ = ["ManagerAgent", "ManagerConfig", "MANAGER_ROLE_PROMPT"]
-

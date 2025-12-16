@@ -109,7 +109,8 @@ OPENROUTER_API_KEY=sk-or-...
 LLM_PROVIDER=openrouter
 LLM_MODEL_TRADER_1=deepseek/deepseek-chat
 LLM_MODEL_TRADER_2=deepseek/deepseek-chat
-LLM_MODEL_TRADER_3=deepseek/deepseek-chat
+LLM_MODEL_TRADER_3=deepseek/deepseek-chat  # macro/news trader
+LLM_MODEL_TRADER_4=deepseek/deepseek-chat  # market-structure/funding trader
 LLM_MODEL_MANAGER=deepseek/deepseek-chat
 
 # MongoDB

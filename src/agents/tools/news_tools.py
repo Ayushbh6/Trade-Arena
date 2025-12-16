@@ -25,7 +25,23 @@ async def tavily_search(
         cfg = ctx.config or load_config()
         connector = TavilyNewsConnector.from_app_config(cfg, mongo=ctx.mongo, run_id=ctx.run_id)
     results = connector.search(query, max_results=max_results, recency_hours=recency_hours)
-    return jsonify({"query": query, "results": results})
+
+    persisted = 0
+    if ctx.mongo is not None:
+        try:
+            # Normalize and persist for audit/replay as system-of-record.
+            # We do not attempt to fabricate symbol tagging here; keep symbols empty unless
+            # upstream ingestion provided explicit associations.
+            docs = connector.normalize_results(results, symbols=[])
+            await ctx.mongo.connect()
+            for d in docs:
+                await ctx.mongo.insert_one(NEWS_EVENTS, d)
+                persisted += 1
+        except Exception:
+            # Persistence is best-effort; the tool result is still returned.
+            persisted = 0
+
+    return jsonify({"query": query, "results": results, "persisted_news_events": persisted})
 
 
 async def get_recent_news(
@@ -67,4 +83,3 @@ async def get_recent_news(
 
 
 __all__ = ["tavily_search", "get_recent_news"]
-

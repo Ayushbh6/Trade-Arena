@@ -98,14 +98,33 @@ class MongoManager:
         self.db_name = db_name
         self.client: Optional[MotorClient] = None
         self.db: Optional[MotorDatabase] = None
+        # Fail fast rather than hanging indefinitely if MongoDB isn't reachable.
+        # (Motor uses PyMongo options under the hood.)
+        try:
+            self.timeout_ms = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))
+        except Exception:
+            self.timeout_ms = 5000
 
     async def connect(self) -> MotorDatabase:
         """Connect (lazily) and return the database handle."""
         if self.client is None:
-            self.client = _AsyncIOMotorClientRuntime(self.uri)
+            self.client = _AsyncIOMotorClientRuntime(
+                self.uri,
+                serverSelectionTimeoutMS=self.timeout_ms,
+                connectTimeoutMS=self.timeout_ms,
+                socketTimeoutMS=self.timeout_ms,
+            )
             self.db = self.client[self.db_name]
         if self.db is None:
             raise RuntimeError("MongoManager failed to connect.")
+        # Force a ping once to trigger server selection and surface connectivity errors promptly.
+        try:
+            await self.db.command("ping")
+        except Exception as e:
+            raise RuntimeError(
+                f"MongoDB ping failed (uri={self.uri!r}, db={self.db_name!r}). "
+                "Is MongoDB running and reachable?"
+            ) from e
         return self.db
 
     async def close(self) -> None:
