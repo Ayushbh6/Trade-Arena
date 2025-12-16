@@ -194,6 +194,45 @@ python run.py
 python run.py --config configs/production.yaml
 ```
 
+## 🖥️ Dashboard (Phase 11)
+
+This repo uses a **two-service** setup in production (recommended for Railway):
+- **API service**: FastAPI (`src/ui/api.py`)
+- **UI service**: Vite + React SPA (`frontend/`)
+
+### Run the API
+
+```bash
+source venv/bin/activate
+export MONGODB_URI="mongodb://localhost:27017"
+
+# Local/dev: open CORS, auth off
+export UI_ALLOWED_ORIGINS="*"
+export UI_AUTH_ENABLED="false"
+
+python -m src.ui.serve --reload
+```
+
+### Run the UI
+
+```bash
+cd frontend
+cp .env.example .env
+# Edit VITE_API_BASE_URL=http://localhost:8000
+
+npm install
+npm run dev
+```
+
+### Hosted (Railway) auth toggle
+
+Set these env vars on the **API service**:
+- `UI_AUTH_ENABLED=true`
+- `UI_BASIC_AUTH_USER=user001`
+- `UI_BASIC_AUTH_PASS=trader@123`
+- `UI_TOKEN_SECRET=<random long secret>`
+- `UI_ALLOWED_ORIGINS=<your UI domain>`
+
 ## 📖 Documentation
 
 - **[MVP Specification](Plan/ai-native-trader-comp.md)** - Full technical spec, agent protocols, risk rules

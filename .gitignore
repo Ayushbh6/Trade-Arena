@@ -35,8 +35,14 @@ logs/
 # TWS Settings (if any get saved locally)
 tws_settings/
 
+# Frontend
+node_modules/
+dist/
+.vite/
+frontend/node_modules/
+frontend/dist/
+
 
 ##Specific
 *.md
 !README.md
-

@@ -35,8 +35,8 @@ async def main() -> None:
     print("[OK] Mongo ready.")
 
     run_id = "run_trust_weekly_test"
-    agent_good = "agent_good"
-    agent_bad = "agent_bad"
+    agent_good = "tech_trader_1"
+    agent_bad = "structure_trader_1"
 
     # Previous week window: Mon->Mon UTC (synthetic timestamps, real Mongo).
     start = _dt(2025, 1, 6)  # Monday
@@ -45,12 +45,12 @@ async def main() -> None:
     # Seed minimal agent_states budgets (trust will be computed).
     await mongo.collection(AGENT_STATES).update_one(
         {"agent_id": agent_good},
-        {"$set": {"agent_id": agent_good, "role": "test", "budget_usdt": 1000.0}},
+        {"$set": {"agent_id": agent_good, "role": "technical", "budget_usdt": 1000.0}},
         upsert=True,
     )
     await mongo.collection(AGENT_STATES).update_one(
         {"agent_id": agent_bad},
-        {"$set": {"agent_id": agent_bad, "role": "test", "budget_usdt": 1000.0}},
+        {"$set": {"agent_id": agent_bad, "role": "structure", "budget_usdt": 1000.0}},
         upsert=True,
     )
 
@@ -118,4 +118,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

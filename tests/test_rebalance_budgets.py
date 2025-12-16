@@ -35,12 +35,12 @@ async def main() -> None:
     policy = RebalancePolicy(baseline_budget_usdt=baseline, min_budget_mult=0.5, max_budget_mult=2.0, max_weekly_change_pct=0.25)
 
     run_id = "run_rebalance_test"
-    a1, a2, a3 = "agent_a", "agent_b", "agent_c"
+    a1, a2, a3 = "tech_trader_1", "macro_trader_1", "structure_trader_1"
 
     # Seed current budgets.
-    await mongo.collection(AGENT_STATES).update_one({"agent_id": a1}, {"$set": {"agent_id": a1, "role": "test", "budget_usdt": baseline}}, upsert=True)
-    await mongo.collection(AGENT_STATES).update_one({"agent_id": a2}, {"$set": {"agent_id": a2, "role": "test", "budget_usdt": baseline}}, upsert=True)
-    await mongo.collection(AGENT_STATES).update_one({"agent_id": a3}, {"$set": {"agent_id": a3, "role": "test", "budget_usdt": baseline}}, upsert=True)
+    await mongo.collection(AGENT_STATES).update_one({"agent_id": a1}, {"$set": {"agent_id": a1, "role": "technical", "budget_usdt": baseline}}, upsert=True)
+    await mongo.collection(AGENT_STATES).update_one({"agent_id": a2}, {"$set": {"agent_id": a2, "role": "macro", "budget_usdt": baseline}}, upsert=True)
+    await mongo.collection(AGENT_STATES).update_one({"agent_id": a3}, {"$set": {"agent_id": a3, "role": "structure", "budget_usdt": baseline}}, upsert=True)
 
     trust_scores = {a1: 90.0, a2: 50.0, a3: 10.0}
     res = await apply_rebalanced_budgets(mongo=mongo, run_id=run_id, trust_scores=trust_scores, policy=policy, cfg=cfg)
@@ -71,4 +71,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
