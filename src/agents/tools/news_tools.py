@@ -20,6 +20,8 @@ async def tavily_search(
     context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     ctx = context or ToolContext()
+    if bool(ctx.replay_mode):
+        raise RuntimeError("tavily_search is disabled in replay_mode (no network).")
     connector = ctx.news_connector
     if connector is None:
         cfg = ctx.config or load_config()
@@ -52,14 +54,19 @@ async def get_recent_news(
     context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     ctx = context or ToolContext()
+    now = ctx.as_of or utc_now()
     if ctx.mongo is None:
-        return {"as_of": utc_now(), "symbols": {s: [] for s in symbols}}
+        return {"as_of": now, "symbols": {s: [] for s in symbols}}
 
-    cutoff = utc_now() - timedelta(hours=lookback_hours)
+    cutoff = now - timedelta(hours=lookback_hours)
     await ctx.mongo.connect()
     col = ctx.mongo.collection(NEWS_EVENTS)
+    data_run_id = ctx.data_run_id or ctx.run_id
+    q: Dict[str, Any] = {"timestamp": {"$gte": cutoff, "$lte": now}, "symbols": {"$in": symbols}}
+    if data_run_id:
+        q["run_id"] = data_run_id
     cursor = (
-        col.find({"timestamp": {"$gte": cutoff}, "symbols": {"$in": symbols}})
+        col.find(q)
         .sort("timestamp", -1)
         .limit(max_items)
     )
@@ -79,7 +86,7 @@ async def get_recent_news(
             if s in grouped:
                 grouped[s].append(item)
 
-    return jsonify({"as_of": utc_now(), "symbols": grouped})
+    return jsonify({"as_of": now, "symbols": grouped})
 
 
 __all__ = ["tavily_search", "get_recent_news"]

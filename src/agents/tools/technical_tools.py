@@ -79,9 +79,13 @@ async def get_candles(
     if ctx.mongo is None:
         raise RuntimeError("Mongo is required for get_candles.")
 
-    snapshot = await _find_latest(
-        ctx.mongo, MARKET_SNAPSHOTS, {"symbols": {"$in": symbols}}
-    )
+    snapshot = ctx.snapshot
+    if snapshot is None:
+        data_run_id = ctx.data_run_id or ctx.run_id
+        q: Dict[str, Any] = {"symbols": {"$in": symbols}}
+        if data_run_id:
+            q["run_id"] = data_run_id
+        snapshot = await _find_latest(ctx.mongo, MARKET_SNAPSHOTS, q, as_of=ctx.as_of)
     if snapshot is None:
         raise RuntimeError("No market snapshot available.")
 
@@ -141,9 +145,13 @@ async def get_indicator_pack(
     if ctx.mongo is None:
         raise RuntimeError("Mongo is required for get_indicator_pack.")
 
-    snapshot = await _find_latest(
-        ctx.mongo, MARKET_SNAPSHOTS, {"symbols": {"$in": symbols}}
-    )
+    snapshot = ctx.snapshot
+    if snapshot is None:
+        data_run_id = ctx.data_run_id or ctx.run_id
+        q: Dict[str, Any] = {"symbols": {"$in": symbols}}
+        if data_run_id:
+            q["run_id"] = data_run_id
+        snapshot = await _find_latest(ctx.mongo, MARKET_SNAPSHOTS, q, as_of=ctx.as_of)
     if snapshot is None:
         raise RuntimeError("No market snapshot available.")
 

@@ -51,10 +51,20 @@ async def get_orderbook_top(
     if ctx.mongo is None:
         raise RuntimeError("Mongo is required for get_orderbook_top.")
 
-    await ctx.mongo.connect()
-    col = ctx.mongo.collection(MARKET_SNAPSHOTS)
-    snap = await col.find({"symbols": {"$in": symbols}}).sort("timestamp", -1).limit(1).to_list(length=1)
-    snapshot = snap[0] if snap else None
+    snapshot = ctx.snapshot
+    if snapshot is None:
+        data_run_id = ctx.data_run_id or ctx.run_id
+        q: Dict[str, Any] = {"symbols": {"$in": symbols}}
+        if data_run_id:
+            q["run_id"] = data_run_id
+        if ctx.as_of is not None:
+            q["timestamp"] = {"$lte": ctx.as_of}
+        await ctx.mongo.connect()
+        col = ctx.mongo.collection(MARKET_SNAPSHOTS)
+        snap = (
+            await col.find(q).sort("timestamp", -1).limit(1).to_list(length=1)
+        )
+        snapshot = snap[0] if snap else None
     if snapshot is None:
         raise RuntimeError("No market snapshot available.")
 
@@ -102,11 +112,19 @@ async def get_funding_oi_history(
     hours = max(1, int(lookback_hours))
     points = max(1, min(int(max_points), 240))
 
-    cutoff = utc_now() - timedelta(hours=hours)
+    now = ctx.as_of or utc_now()
+    cutoff = now - timedelta(hours=hours)
+    as_of = ctx.as_of
     await ctx.mongo.connect()
     col = ctx.mongo.collection(MARKET_SNAPSHOTS)
+    data_run_id = ctx.data_run_id or ctx.run_id
+    q: Dict[str, Any] = {"timestamp": {"$gte": cutoff}, "symbols": {"$in": symbols}}
+    if as_of is not None:
+        q["timestamp"]["$lte"] = as_of
+    if data_run_id:
+        q["run_id"] = data_run_id
     cursor = (
-        col.find({"timestamp": {"$gte": cutoff}, "symbols": {"$in": symbols}})
+        col.find(q)
         .sort("timestamp", -1)
         .limit(points)
     )
@@ -188,4 +206,3 @@ async def get_funding_oi_history(
 
 
 __all__ = ["get_orderbook_top", "get_funding_oi_history"]
-

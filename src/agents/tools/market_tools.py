@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ...config import load_config
@@ -15,13 +15,26 @@ from .context import ToolContext
 
 
 async def _find_latest(
-    mongo: MongoManager, collection: str, query: Dict[str, Any]
+    mongo: MongoManager,
+    collection: str,
+    query: Dict[str, Any],
+    *,
+    as_of: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
+    q = dict(query)
+    if as_of is not None:
+        ts = q.get("timestamp")
+        if isinstance(ts, dict):
+            ts = dict(ts)
+            ts.setdefault("$lte", as_of)
+            q["timestamp"] = ts
+        else:
+            q["timestamp"] = {"$lte": as_of}
     if hasattr(mongo, "find_latest"):
-        return await mongo.find_latest(collection, query)  # type: ignore[attr-defined]
+        return await mongo.find_latest(collection, q)  # type: ignore[attr-defined]
     await mongo.connect()
     col = mongo.collection(collection)
-    cursor = col.find(query).sort("timestamp", -1).limit(1)
+    cursor = col.find(q).sort("timestamp", -1).limit(1)
     docs = await cursor.to_list(length=1)
     return docs[0] if docs else None
 
@@ -39,11 +52,18 @@ async def get_market_brief(
     builder = ctx.market_state_builder or MarketStateBuilder()
 
     snapshot: Optional[Dict[str, Any]] = None
+    if ctx.snapshot is not None:
+        snapshot = ctx.snapshot
     if ctx.mongo is not None:
+        data_run_id = ctx.data_run_id or ctx.run_id
+        q: Dict[str, Any] = {"symbols": {"$in": symbols}}
+        if data_run_id:
+            q["run_id"] = data_run_id
         snapshot = await _find_latest(
             ctx.mongo,
             MARKET_SNAPSHOTS,
-            {"symbols": {"$in": symbols}},
+            q,
+            as_of=ctx.as_of,
         )
 
     if snapshot is None:
@@ -127,11 +147,19 @@ async def get_market_brief(
 
     # Attach recent news (if available)
     if ctx.mongo is not None:
-        cutoff = utc_now() - timedelta(minutes=lookback_minutes)
+        now = ctx.as_of or utc_now()
+        cutoff = now - timedelta(minutes=lookback_minutes)
+        data_run_id = ctx.data_run_id or ctx.run_id
         await ctx.mongo.connect()
         col = ctx.mongo.collection(NEWS_EVENTS)
+        news_q: Dict[str, Any] = {
+            "timestamp": {"$gte": cutoff, "$lte": now},
+            "symbols": {"$in": symbols},
+        }
+        if data_run_id:
+            news_q["run_id"] = data_run_id
         cursor = (
-            col.find({"timestamp": {"$gte": cutoff}, "symbols": {"$in": symbols}})
+            col.find(news_q)
             .sort("timestamp", -1)
             .limit(20)
         )
@@ -164,9 +192,15 @@ async def get_position_summary(
     pos_col = ctx.mongo.collection(POSITIONS)
     ord_col = ctx.mongo.collection(ORDERS)
 
-    positions = await pos_col.find({"agent_owner": agent_id}).to_list(length=50)
+    data_run_id = ctx.data_run_id or ctx.run_id
+    pos_q: Dict[str, Any] = {"agent_owner": agent_id}
+    ord_q: Dict[str, Any] = {"agent_owner": agent_id}
+    if data_run_id:
+        pos_q["run_id"] = data_run_id
+        ord_q["run_id"] = data_run_id
+    positions = await pos_col.find(pos_q).to_list(length=50)
     last_orders = (
-        await ord_col.find({"agent_owner": agent_id})
+        await ord_col.find(ord_q)
         .sort("timestamp", -1)
         .limit(10)
         .to_list(length=10)
@@ -201,7 +235,11 @@ async def get_firm_state(
 
     await ctx.mongo.connect()
     # Best-effort aggregation from agent_states if present.
-    states = await ctx.mongo.collection(AGENT_STATES).find({}).to_list(length=50)
+    data_run_id = ctx.data_run_id or ctx.run_id
+    q: Dict[str, Any] = {}
+    if data_run_id:
+        q["run_id"] = data_run_id
+    states = await ctx.mongo.collection(AGENT_STATES).find(q).to_list(length=50)
     if states:
         budgets: Dict[str, Any] = {}
         for s in states:
@@ -223,6 +261,8 @@ async def query_memory(
     context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     ctx = context or ToolContext()
+    if bool(ctx.replay_mode):
+        raise RuntimeError("query_memory is disabled in replay_mode (no embeddings/network).")
     if ctx.mongo is None:
         return {
             "agent_id": agent_id,

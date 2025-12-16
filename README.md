@@ -318,7 +318,10 @@ Access at: `http://localhost:8000`
 Replay any trading session from stored snapshots:
 
 ```bash
-python -m src.orchestrator.replay --run-id 2025-12-11-session-001
+python run.py --replay \
+  --replay-source-run-id run_20251215_142035_abcdef12 \
+  --from-ts 2025-12-15T00:00:00Z \
+  --to-ts 2025-12-16T00:00:00Z
 ```
 
 Compare original vs replay decisions for evaluation and debugging.

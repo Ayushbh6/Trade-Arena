@@ -7,7 +7,8 @@ while dependencies (Mongo, config, builders, connectors) are provided via contex
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 from ...config import AppConfig
 from ...data.mongo import MongoManager
@@ -21,5 +22,10 @@ class ToolContext:
     config: Optional[AppConfig] = None
     market_state_builder: Optional[MarketStateBuilder] = None
     news_connector: Optional[TavilyNewsConnector] = None
+    # Logging / output attribution.
     run_id: Optional[str] = None
-
+    # Replay support: allow tools to read from a fixed snapshot/run window (no live fetches).
+    data_run_id: Optional[str] = None
+    as_of: Optional[datetime] = None
+    snapshot: Optional[Dict[str, Any]] = None
+    replay_mode: bool = False

@@ -17,6 +17,7 @@ from src.config import load_config
 from src.data.mongo import MongoManager
 from src.orchestrator.main_loop import MainLoopConfig, run_forever, run_once
 from src.orchestrator.orchestrator import Orchestrator, OrchestratorConfig
+from src.orchestrator.run_manager import RunManager, generate_run_id
 
 
 def _utc_now_str() -> str:
@@ -25,9 +26,31 @@ def _utc_now_str() -> str:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="AI-Native Trader Co. (testnet)")
-    p.add_argument("--run-id", default=f"run_{_utc_now_str()}", help="Run/session identifier")
+    p.add_argument("--run-id", default=generate_run_id(prefix="run"), help="Run/session identifier")
     p.add_argument("--once", action="store_true", help="Run exactly one cycle and exit")
     p.add_argument("--cycle-id", default=None, help="Optional cycle id for --once")
+    p.add_argument(
+        "--set-run-status",
+        default=None,
+        choices=["running", "paused", "stopped"],
+        help="Update run session status in Mongo and exit (Phase 10 pause/resume).",
+    )
+    p.add_argument(
+        "--replay",
+        action="store_true",
+        help="Run Phase 10 replay: re-run traders+manager against stored snapshots (no execution).",
+    )
+    p.add_argument("--replay-source-run-id", default=None, help="Source run_id to replay (required for --replay).")
+    p.add_argument("--from-ts", default=None, help="Replay window start (UTC ISO, e.g. 2025-12-15T00:00:00Z).")
+    p.add_argument("--to-ts", default=None, help="Replay window end (UTC ISO, e.g. 2025-12-16T00:00:00Z).")
+    p.add_argument("--replay-run-id", default=None, help="run_id to write replay outputs under (optional).")
+    p.add_argument("--replay-model-tech-trader-1", default=None, help="Override model for tech_trader_1 in replay.")
+    p.add_argument("--replay-model-tech-trader-2", default=None, help="Override model for tech_trader_2 in replay.")
+    p.add_argument("--replay-model-macro-trader-1", default=None, help="Override model for macro_trader_1 in replay.")
+    p.add_argument(
+        "--replay-model-structure-trader-1", default=None, help="Override model for structure_trader_1 in replay."
+    )
+    p.add_argument("--replay-model-manager", default=None, help="Override model for manager in replay.")
     p.add_argument(
         "--weekly-review",
         action="store_true",
@@ -61,6 +84,51 @@ async def _amain() -> int:
     mongo = MongoManager(db_name=args.db_name)
     await mongo.connect()
     await mongo.ensure_indexes()
+    run_mgr = RunManager(mongo=mongo)
+
+    if args.set_run_status:
+        await run_mgr.set_status(run_id=args.run_id, status=str(args.set_run_status))
+        print(f"[INFO] run_status_updated run_id={args.run_id} status={args.set_run_status}")
+        return 0
+
+    if args.replay:
+        from src.orchestrator.replay import parse_ts_utc, run_replay
+
+        if not args.replay_source_run_id or not args.from_ts or not args.to_ts:
+            raise SystemExit("--replay requires --replay-source-run-id, --from-ts, and --to-ts")
+        replay_run_id = args.replay_run_id or generate_run_id(prefix=f"replay_{args.replay_source_run_id}")
+        await run_mgr.create_if_missing(run_id=replay_run_id, cfg=cfg, status="running")
+
+        orch = Orchestrator(
+            mongo=mongo,
+            config=cfg,
+            orchestrator_config=OrchestratorConfig(
+                execute_testnet=False,
+                memory_compression=bool(args.memory_compression),
+            ),
+        )
+
+        overrides = {
+            "tech_trader_1": args.replay_model_tech_trader_1,
+            "tech_trader_2": args.replay_model_tech_trader_2,
+            "macro_trader_1": args.replay_model_macro_trader_1,
+            "structure_trader_1": args.replay_model_structure_trader_1,
+            "manager": args.replay_model_manager,
+        }
+        overrides = {k: v for k, v in overrides.items() if v}
+
+        res = await run_replay(
+            orchestrator=orch,
+            source_run_id=str(args.replay_source_run_id),
+            replay_run_id=replay_run_id,
+            start=parse_ts_utc(str(args.from_ts)),
+            end=parse_ts_utc(str(args.to_ts)),
+            model_overrides=overrides or None,
+        )
+        print("[INFO] replay_report:", res)
+        return 0
+
+    await run_mgr.create_if_missing(run_id=args.run_id, cfg=cfg, status="running")
 
     print("[INFO] Starting AI-Native Trader Co.")
     print(f"[INFO] run_id={args.run_id}")

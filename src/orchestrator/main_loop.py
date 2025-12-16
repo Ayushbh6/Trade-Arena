@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from src.data.audit import AuditContext, AuditManager
 from src.orchestrator.orchestrator import Orchestrator
+from src.orchestrator.run_manager import RunManager
 from src.portfolio.portfolio import PortfolioManager
 from src.portfolio.reporting import ReportingEngine
 from src.orchestrator.weekly_review import run_weekly_review
@@ -80,8 +81,21 @@ async def run_forever(
         pass
 
     scheduler = AsyncIOScheduler(timezone="UTC")
+    run_mgr = RunManager(mongo=orchestrator.mongo)
+    await run_mgr.create_if_missing(run_id=run_id, cfg=orchestrator.config, status="running")
 
     async def _job() -> None:
+        status = await run_mgr.get_status(run_id=run_id)
+        if status == "paused":
+            await AuditManager(orchestrator.mongo).log(
+                "cycle_skipped_paused",
+                {"run_id": run_id},
+                ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
+            )
+            return
+        if status == "stopped":
+            stop_event.set()
+            return
         await orchestrator.run_cycle(run_id=run_id, cycle_id=_cycle_id())
 
     scheduler.add_job(

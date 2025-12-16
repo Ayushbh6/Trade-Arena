@@ -734,5 +734,290 @@ class Orchestrator:
             execution_status=str(execution_status),
         )
 
+    async def run_cycle_from_snapshot(
+        self,
+        *,
+        source_run_id: str,
+        snapshot: Dict[str, Any],
+        run_id: str,
+        cycle_id: str,
+        models: Optional[Dict[str, str]] = None,
+    ) -> CycleResult:
+        """Replay a single cycle using an already-stored snapshot (Phase 10.2).
+
+        - Never fetches live market/news data.
+        - Skips execution and portfolio/P&L updates (decision replay only).
+        """
+        await self.mongo.connect()
+        await self.mongo.ensure_indexes()
+
+        audit = AuditManager(self.mongo)
+        audit_ctx = AuditContext(run_id=run_id, agent_id="replay")
+        await audit.log(
+            "replay_cycle_start",
+            {"cycle_id": cycle_id, "source_run_id": source_run_id, "source_snapshot_id": str(snapshot.get("_id"))},
+            ctx=audit_ctx,
+        )
+
+        builder = MarketStateBuilder()
+        full_brief = builder.build_market_brief(snapshot)
+        symbols = list(self.config.trading.symbols)
+        thin_brief = _thin_market_brief(full_brief, symbols)
+        thin_brief["run_id"] = run_id
+        thin_brief["cycle_id"] = cycle_id
+
+        tools_ctx = ToolContext(
+            mongo=self.mongo,
+            config=self.config,
+            market_state_builder=builder,
+            news_connector=None,
+            run_id=run_id,
+            data_run_id=source_run_id,
+            as_of=snapshot.get("timestamp"),
+            snapshot=snapshot,
+            replay_mode=True,
+        )
+
+        firm_state_dict = await asyncio.wait_for(get_firm_state(context=tools_ctx), timeout=15.0)
+
+        # Prefer per-cycle original model selection if provided; otherwise fall back to env defaults.
+        trader_model_1, trader_model_2, trader_model_3, trader_model_4, manager_model = self._models()
+        if models:
+            trader_model_1 = models.get("tech_trader_1") or trader_model_1
+            trader_model_2 = models.get("tech_trader_2") or trader_model_2
+            trader_model_3 = models.get("macro_trader_1") or trader_model_3
+            trader_model_4 = models.get("structure_trader_1") or trader_model_4
+            manager_model = models.get("manager") or manager_model
+
+        await audit.log(
+            "replay_models_selected",
+            {
+                "cycle_id": cycle_id,
+                "source_run_id": source_run_id,
+                "trader_models": {
+                    "tech_trader_1": trader_model_1,
+                    "tech_trader_2": trader_model_2,
+                    "macro_trader_1": trader_model_3,
+                    "structure_trader_1": trader_model_4,
+                },
+                "manager_model": manager_model,
+            },
+            ctx=audit_ctx,
+        )
+
+        enable_phase7 = bool(self.orchestrator_config.memory_compression)
+        summarizer_model = (
+            os.getenv("LLM_MODEL_SUMMARIZER")
+            or os.getenv("LLM_MODEL_SUMMARISER")
+            or self.orchestrator_config.summarizer_model
+        )
+
+        trader_1 = TechnicalTrader(
+            agent_id="tech_trader_1",
+            config=TechnicalTraderConfig(
+                model=trader_model_1,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+            ],
+        )
+        trader_2 = TechnicalTrader(
+            agent_id="tech_trader_2",
+            config=TechnicalTraderConfig(
+                model=trader_model_2,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+            ],
+        )
+        macro_1 = MacroTrader(
+            agent_id="macro_trader_1",
+            config=MacroTraderConfig(
+                model=trader_model_3,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_recent_news",
+                "get_position_summary",
+                "get_firm_state",
+            ],
+        )
+        structure_1 = StructureTrader(
+            agent_id="structure_trader_1",
+            config=StructureTraderConfig(
+                model=trader_model_4,
+                max_tool_calls=6,
+                max_tool_turns=6,
+                enable_phase7_context=enable_phase7,
+                enable_phase7_compression=enable_phase7,
+                phase7_summarizer_model=summarizer_model,
+            ),
+            tools_context=tools_ctx,
+            allowed_tools=[
+                "get_market_brief",
+                "get_funding_oi_history",
+                "get_orderbook_top",
+                "get_candles",
+                "get_indicator_pack",
+                "get_position_summary",
+                "get_firm_state",
+            ],
+        )
+
+        async def _safe_trader(trader: Any, *, model: str) -> TradeProposal:
+            try:
+                return await asyncio.wait_for(
+                    self._run_trader(
+                        trader=trader,
+                        thin_brief=thin_brief,
+                        firm_state=firm_state_dict,
+                        cycle_id=cycle_id,
+                    ),
+                    timeout=self.orchestrator_config.trader_timeout_s,
+                )
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                await audit.log(
+                    "replay_trader_error",
+                    {
+                        "cycle_id": cycle_id,
+                        "agent_id": trader.agent_id,
+                        "model": model,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "error_repr": repr(e),
+                    },
+                    ctx=audit_ctx,
+                )
+                return TradeProposal(
+                    agent_id=trader.agent_id,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    timestamp=_utc_now(),
+                    trades=[],
+                    notes=f"Replay trader error; forced no-trade. error={e}",
+                )
+
+        traders: List[Tuple[Any, str]] = [
+            (trader_1, trader_model_1),
+            (trader_2, trader_model_2),
+            (macro_1, trader_model_3),
+            (structure_1, trader_model_4),
+        ]
+        proposals: List[TradeProposal] = list(
+            await asyncio.gather(*[_safe_trader(t, model=m) for (t, m) in traders])
+        )
+        await audit.log(
+            "replay_trader_proposals_ready",
+            {"cycle_id": cycle_id, "proposals": [p.model_dump(mode="json") for p in proposals]},
+            ctx=audit_ctx,
+        )
+        for p in proposals:
+            await self._persist_trade_proposal(p)
+
+        compliance_reports = [
+            await validate_proposal(p, tools_context=tools_ctx, firm_state=firm_state_dict, market_brief=full_brief)
+            for p in proposals
+        ]
+        await audit.log(
+            "replay_risk_reports_ready",
+            {"cycle_id": cycle_id, "reports": [r.model_dump(mode="json") for r in compliance_reports]},
+            ctx=audit_ctx,
+        )
+
+        manager = ManagerAgent(
+            manager_id="manager",
+            config=ManagerConfig(model=manager_model, max_tool_calls=4, max_tool_turns=4),
+            tools_context=tools_ctx,
+        )
+
+        manager_decision: Optional[ManagerDecision] = None
+        try:
+            trust_scores = await load_trust_scores(
+                mongo=self.mongo,
+                agent_ids=[p.agent_id for p in proposals],
+                default_trust=50.0,
+            )
+            manager_decision = await asyncio.wait_for(
+                manager.decide(
+                    proposals=[p.model_dump(mode="json") for p in proposals],
+                    compliance_reports=[r.model_dump(mode="json") for r in compliance_reports],
+                    trust_scores=trust_scores,
+                    firm_state=firm_state_dict,
+                    positions_by_agent=None,
+                    run_id=run_id,
+                    cycle_id=cycle_id,
+                    extra_instructions="Replay run: skip execution; output ONLY ManagerDecision JSON.",
+                ),
+                timeout=self.orchestrator_config.manager_timeout_s,
+            )
+            manager_decision.manager_id = manager.manager_id
+            manager_decision.run_id = run_id
+            manager_decision.cycle_id = cycle_id
+            manager_decision.timestamp = _utc_now()
+            await self._persist_manager_decision(manager_decision)
+            await audit.log(
+                "replay_manager_decision_ready",
+                {"cycle_id": cycle_id, "decision": manager_decision.model_dump(mode="json")},
+                ctx=audit_ctx,
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            await audit.log(
+                "replay_manager_error",
+                {
+                    "cycle_id": cycle_id,
+                    "model": manager_model,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "error_repr": repr(e),
+                },
+                ctx=audit_ctx,
+            )
+
+        await audit.log(
+            "replay_cycle_end",
+            {
+                "cycle_id": cycle_id,
+                "source_run_id": source_run_id,
+                "source_snapshot_id": str(snapshot.get("_id")),
+            },
+            ctx=audit_ctx,
+        )
+
+        return CycleResult(
+            run_id=run_id,
+            cycle_id=cycle_id,
+            snapshot_id=str(snapshot.get("_id")) if snapshot.get("_id") else None,
+            proposals=proposals,
+            manager_decision=manager_decision,
+            order_plan_intents=0,
+            execution_status="replay_skipped",
+        )
+
 
 __all__ = ["Orchestrator", "OrchestratorConfig", "CycleResult"]
