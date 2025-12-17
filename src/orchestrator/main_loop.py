@@ -38,6 +38,7 @@ class MainLoopConfig:
     weekly_review_day: str = "mon"  # UTC
     weekly_review_hour: int = 0
     weekly_review_minute: int = 5
+    max_cycles: Optional[int] = None  # Phase 12: stop after N cycles
 
 
 async def run_once(*, orchestrator: Orchestrator, run_id: str, cycle_id: Optional[str] = None) -> None:
@@ -57,6 +58,7 @@ async def run_forever(
     cfg: MainLoopConfig,
 ) -> None:
     stop_event = asyncio.Event()
+    cycle_counter = 0  # Phase 12: track cycles
 
     # Instantiate Portfolio Manager and Reporting Engine
     # Note: These persist across cycles in the main loop
@@ -85,6 +87,19 @@ async def run_forever(
     await run_mgr.create_if_missing(run_id=run_id, cfg=orchestrator.config, status="running")
 
     async def _job() -> None:
+        nonlocal cycle_counter
+        
+        # Phase 12: Check max_cycles limit
+        if cfg.max_cycles and cycle_counter >= cfg.max_cycles:
+            await AuditManager(orchestrator.mongo).log(
+                "max_cycles_reached",
+                {"run_id": run_id, "cycles": cycle_counter, "max_cycles": cfg.max_cycles},
+                ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
+            )
+            await run_mgr.set_status(run_id=run_id, status="completed")
+            stop_event.set()
+            return
+        
         status = await run_mgr.get_status(run_id=run_id)
         if status == "paused":
             await AuditManager(orchestrator.mongo).log(
@@ -96,7 +111,37 @@ async def run_forever(
         if status == "stopped":
             stop_event.set()
             return
+        
         await orchestrator.run_cycle(run_id=run_id, cycle_id=_cycle_id())
+        cycle_counter += 1
+        
+        # Update cycle progress in MongoDB
+        await orchestrator.mongo.db.run_sessions.update_one(
+            {"run_id": run_id},
+            {
+                "$set": {
+                    "current_cycle": cycle_counter,
+                    "total_cycles": cfg.max_cycles,
+                    "status": "running",
+                }
+            },
+        )
+        await AuditManager(orchestrator.mongo).log(
+            "cycle_progress",
+            {"run_id": run_id, "current_cycle": cycle_counter, "total_cycles": cfg.max_cycles},
+            ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
+        )
+
+        # If we just completed the last cycle, stop immediately (don't wait for the next scheduler tick).
+        if cfg.max_cycles and cycle_counter >= cfg.max_cycles:
+            await AuditManager(orchestrator.mongo).log(
+                "run_complete",
+                {"run_id": run_id, "cycles": cycle_counter},
+                ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
+            )
+            await run_mgr.set_status(run_id=run_id, status="completed")
+            stop_event.set()
+            return
 
     scheduler.add_job(
         _job,
@@ -133,6 +178,12 @@ async def run_forever(
         },
         ctx=AuditContext(run_id=run_id, agent_id="orchestrator"),
     )
+
+    # Run the first cycle immediately so the UI sees activity without waiting a full cadence interval.
+    await _job()
+    if stop_event.is_set():
+        await audit.log("main_loop_stop", {"run_id": run_id}, ctx=AuditContext(run_id=run_id, agent_id="orchestrator"))
+        return
 
     scheduler.start()
     try:

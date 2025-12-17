@@ -158,6 +158,8 @@ class OrchestratorConfig:
     # and allow LLM-based narrative compression.
     memory_compression: bool = False
     summarizer_model: str = "google/gemini-2.5-flash-lite"
+    # Phase 12: trader filtering
+    enabled_traders: Optional[List[str]] = None
 
 
 @dataclass(frozen=True)
@@ -459,9 +461,44 @@ class Orchestrator:
             (macro_1, trader_model_3),
             (structure_1, trader_model_4),
         ]
-        proposals: List[TradeProposal] = list(
-            await asyncio.gather(*[_safe_trader(t, model=m) for (t, m) in traders])
-        )
+        
+        # Phase 12: Filter traders if enabled_traders is specified
+        if self.orchestrator_config.enabled_traders:
+            enabled_set = set(self.orchestrator_config.enabled_traders)
+            filtered_traders = [(t, m) for (t, m) in traders if t.agent_id in enabled_set]
+            skipped_traders = [t.agent_id for (t, _m) in traders if t.agent_id not in enabled_set]
+            traders = filtered_traders
+            if skipped_traders:
+                await audit.log(
+                    "traders_filtered",
+                    {
+                        "cycle_id": cycle_id,
+                        "enabled": list(enabled_set),
+                        "skipped": skipped_traders,
+                    },
+                    ctx=audit_ctx,
+                )
+        
+        async def _run_one(trader: Any, *, model: str) -> Tuple[TradeProposal, str]:
+            p = await _safe_trader(trader, model=model)
+            return p, model
+
+        proposals: List[TradeProposal] = []
+        tasks = [asyncio.create_task(_run_one(t, model=m)) for (t, m) in traders]
+        for fut in asyncio.as_completed(tasks):
+            p, model = await fut
+            proposals.append(p)
+            await audit.log(
+                "trader_proposal_ready",
+                {
+                    "cycle_id": cycle_id,
+                    "agent_id": p.agent_id,
+                    "model": model,
+                    "proposal": p.model_dump(mode="json"),
+                },
+                ctx=audit_ctx,
+            )
+            await self._persist_trade_proposal(p)
         await audit.log(
             "tool_results_summary_traders",
             {
@@ -486,9 +523,6 @@ class Orchestrator:
             {"cycle_id": cycle_id, "proposals": [p.model_dump(mode="json") for p in proposals]},
             ctx=audit_ctx,
         )
-
-        for p in proposals:
-            await self._persist_trade_proposal(p)
 
         # 4) Risk validation (deterministic) + manager decision
         compliance_reports = [
@@ -613,6 +647,14 @@ class Orchestrator:
 
         if self.orchestrator_config.execute_testnet and order_plan_intents > 0 and plan is not None:
             try:
+                await audit.log(
+                    "execution_started",
+                    {
+                        "cycle_id": cycle_id,
+                        "order_plan_intents": order_plan_intents,
+                    },
+                    ctx=audit_ctx,
+                )
                 client = BinanceFuturesClient(
                     testnet=self.config.binance.testnet,
                     base_url=self.config.binance.base_url,
@@ -633,6 +675,15 @@ class Orchestrator:
                     await audit.log(
                         "execution_report",
                         {"cycle_id": cycle_id, "report": report.model_dump(mode="json")},
+                        ctx=audit_ctx,
+                    )
+                    await audit.log(
+                        "execution_complete",
+                        {
+                            "cycle_id": cycle_id,
+                            "status": execution_status,
+                            "results": [r.model_dump(mode="json") for r in (report.results or [])],
+                        },
                         ctx=audit_ctx,
                     )
 
@@ -709,6 +760,15 @@ class Orchestrator:
                 pnl_report = self.reporting_engine.generate_cycle_report(run_id, cycle_id)
                 await self._persist_pnl_report(pnl_report)
                 await audit.log("pnl_report_generated", {"report": pnl_report}, ctx=audit_ctx)
+                await audit.log(
+                    "pnl_updated",
+                    {
+                        "cycle_id": cycle_id,
+                        "firm_metrics": pnl_report.get("firm_metrics"),
+                        "agent_metrics": pnl_report.get("agent_metrics"),
+                    },
+                    ctx=audit_ctx,
+                )
 
             except Exception as e:
                 await audit.log("portfolio_update_error", {"error": str(e)}, ctx=audit_ctx)

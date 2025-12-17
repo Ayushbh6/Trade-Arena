@@ -9,6 +9,7 @@ MongoDB is the system of record. A run session document lets us:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -50,12 +51,17 @@ class RunManager:
     ) -> None:
         await self.mongo.connect()
         now = _utc_now()
+        try:
+            cfg_doc: Dict[str, Any] = asdict(cfg)
+        except Exception:
+            # Best-effort fallback; still keep the session record.
+            cfg_doc = {"raw": str(cfg)}
         doc: Dict[str, Any] = {
             "run_id": run_id,
             "status": status,
             "created_at": now,
             "updated_at": now,
-            "config": jsonify(cfg.model_dump(mode="json")),
+            "config": jsonify(cfg_doc),
         }
         # Upsert to avoid clobbering if multiple workers start the same run_id.
         await self.mongo.collection(RUN_SESSIONS).update_one(
@@ -82,4 +88,3 @@ class RunManager:
 
     async def touch(self, *, run_id: str) -> None:
         await self.set_status(run_id=run_id, status="running")
-

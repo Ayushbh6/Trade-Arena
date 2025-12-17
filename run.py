@@ -73,6 +73,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable APScheduler weekly review job (defaults to Monday 00:05 UTC).",
     )
+    p.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Maximum number of cycles to run (Phase 12 control).",
+    )
+    p.add_argument(
+        "--enabled-traders",
+        default=None,
+        help="Comma-separated list of enabled trader IDs (Phase 12 control).",
+    )
     return p
 
 
@@ -141,12 +152,22 @@ async def _amain() -> int:
     mem_enabled = bool(args.memory_compression or env_mem)
     print(f"[INFO] memory_compression={mem_enabled}")
 
+    # Phase 12: Parse enabled traders filter
+    enabled_traders = None
+    if args.enabled_traders:
+        enabled_traders = [t.strip() for t in args.enabled_traders.split(",") if t.strip()]
+        print(f"[INFO] enabled_traders={enabled_traders}")
+    
+    if args.max_cycles:
+        print(f"[INFO] max_cycles={args.max_cycles}")
+
     orch = Orchestrator(
         mongo=mongo,
         config=cfg,
         orchestrator_config=OrchestratorConfig(
             execute_testnet=not args.dry_run,
             memory_compression=mem_enabled,
+            enabled_traders=enabled_traders,
         ),
     )
 
@@ -164,6 +185,7 @@ async def _amain() -> int:
     ml_cfg = MainLoopConfig(
         cadence_minutes=args.cadence_minutes or cfg.trading.cadence_minutes,
         auto_weekly_review=bool(args.auto_weekly_review),
+        max_cycles=args.max_cycles,
     )
     await run_forever(orchestrator=orch, run_id=args.run_id, cfg=ml_cfg)
     return 0

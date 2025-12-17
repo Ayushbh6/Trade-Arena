@@ -5,6 +5,8 @@ import Panel from "../components/Panel";
 import KpiCard from "../components/KpiCard";
 import TickerRow, { type TickerItem } from "../components/TickerRow";
 import Badge from "../components/Badge";
+import ControlPanel, { type StartConfig, type ControlStatus } from "../components/ControlPanel";
+import EventFeed from "../components/EventFeed";
 import { useApi } from "../api/http";
 import type { AgentState, AuditEvent, Candle, MarketSummaryResponse, ManagerDecision, PnlHistoryResponse, TradeProposal } from "../api/types";
 import { makeLiveUrl, type LiveMessage } from "../api/ws";
@@ -50,6 +52,15 @@ export default function LivePage() {
   const [wsHint, setWsHint] = useState<string | null>(null);
   const [liveMode, setLiveMode] = useState<"ws" | "polling">("ws");
   const [wsFailures, setWsFailures] = useState(0);
+  const [showAudit, setShowAudit] = useState<boolean>(true);
+  const [lastAuditTs, setLastAuditTs] = useState<string | null>(null);
+  
+  // Phase 12: Control panel state
+  const [controlStatus, setControlStatus] = useState<ControlStatus>({
+    running: false,
+    run_id: null,
+  });
+  const [liveEvents, setLiveEvents] = useState<AuditEvent[]>([]);
 
   const chartRef = useRef<HTMLDivElement | null>(null);
   const chartApi = useRef<IChartApi | null>(null);
@@ -58,7 +69,11 @@ export default function LivePage() {
   const equityChart = useRef<IChartApi | null>(null);
   const equitySeries = useRef<ReturnType<IChartApi["addLineSeries"]> | null>(null);
 
-  const firmEquity = (pnl?.firm_metrics as any)?.total_equity ?? (pnl?.firm_metrics as any)?.equity;
+  // Keep the dashboard stable: if this run has no pnl yet, show a sensible baseline.
+  const firmEquity =
+    (pnl?.firm_metrics as any)?.total_equity ??
+    (pnl?.firm_metrics as any)?.equity ??
+    10000;
 
   const refreshCore = async (rid: string | null) => {
     const q = rid ? `?run_id=${encodeURIComponent(rid)}` : "";
@@ -71,7 +86,8 @@ export default function LivePage() {
     setAgents(a.agents || []);
     setProposals(p.proposals || []);
     setDecisions(d.decisions || []);
-    setPnl(pn.latest || null);
+    // Avoid blanking the dashboard while a new run warms up (no PnL yet).
+    if (pn.latest !== null && pn.latest !== undefined) setPnl(pn.latest);
   };
 
   const refreshEquity = async (rid: string | null) => {
@@ -88,7 +104,11 @@ export default function LivePage() {
       if (eq === null) continue;
       points.push({ time: Math.floor(t / 1000), value: eq });
     }
-    setEquityHint(points.length ? null : "No PnL history yet (run the bot for a few cycles).");
+    if (!points.length) {
+      setEquityHint("Waiting for first PnL points…");
+      return;
+    }
+    setEquityHint(null);
     if (!equityRef.current) return;
     if (!equityChart.current) {
       equityChart.current = createChart(equityRef.current, {
@@ -126,9 +146,11 @@ export default function LivePage() {
 
   const refreshTicker = async (rid: string | null) => {
     const ms = await request<MarketSummaryResponse>(withQuery("/market/summary", { timeframe: "5m", run_id: rid }));
+    const symsAll = Object.keys(ms.symbols || {});
+    // If the new run has not produced a market snapshot yet, don't wipe the existing ticker.
+    if (!symsAll.length) return;
     const items: TickerItem[] = [];
-    const syms = Object.keys(ms.symbols || {});
-    for (const s of syms.slice(0, 8)) {
+    for (const s of symsAll.slice(0, 8)) {
       const price = safeNum(ms.symbols[s]?.mark_price) ?? safeNum(ms.symbols[s]?.last_candle?.close);
       // derive a quick 1-bar change by fetching 2 candles
       try {
@@ -148,11 +170,11 @@ export default function LivePage() {
   const refreshChart = async (rid: string | null, symbol = "BTCUSDT") => {
     const res = await request<{ candles: Candle[] }>(withQuery("/market/candles", { symbol, timeframe: "5m", limit: 300, run_id: rid }));
     const candles = res.candles || [];
-    setMarketHint(
-      candles.length
-        ? null
-        : "No market candles found for this run_id. Run `python run.py --once --dry-run --run-id <this run_id>` to generate a market snapshot."
-    );
+    if (!candles.length) {
+      setMarketHint("Waiting for first market snapshot…");
+      return;
+    }
+    setMarketHint(null);
     if (!chartRef.current) return;
     if (!chartApi.current) {
       chartApi.current = createChart(chartRef.current, {
@@ -176,6 +198,66 @@ export default function LivePage() {
     chartApi.current.timeScale().fitContent();
   };
 
+  // Phase 12: Control functions
+  const handleStart = async (config: StartConfig) => {
+    try {
+      const res = await request<any>("/control/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          traders: config.traders,
+          cycles: config.cycles,
+          dry_run: config.dry_run,
+        }),
+      });
+      if (res.success) {
+        const rid = res.run_id as string;
+        setRunId(rid);
+        setLiveEvents([]);
+        setControlStatus({
+          running: true,
+          run_id: rid,
+          current_cycle: 0,
+          total_cycles: config.cycles,
+        });
+      } else {
+        alert(`Failed to start: ${res.error || "unknown error"}`);
+      }
+    } catch (err: any) {
+      alert(`Failed to start: ${err.message}`);
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await request<any>("/control/stop", { method: "POST" });
+      setControlStatus(prev => ({ ...prev, running: false }));
+    } catch (err: any) {
+      alert(`Failed to stop: ${err.message}`);
+    }
+  };
+
+  // Phase 12: Poll control status
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      if (!alive) return;
+      try {
+        const status = await request<ControlStatus>("/control/status");
+        setControlStatus(status);
+        if (status.run_id && status.run_id !== runId) {
+          setRunId(status.run_id);
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (alive) setTimeout(poll, 2000);
+      }
+    };
+    poll();
+    return () => { alive = false; };
+  }, [runId, request]);
+
   useEffect(() => {
     request<{ run_id: string | null; auth_enabled: boolean }>("/healthz")
       .then((h) => {
@@ -194,6 +276,30 @@ export default function LivePage() {
     refreshEquity(runId).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
+
+  // Backfill recent audit/events on refresh so the page doesn't look empty.
+  useEffect(() => {
+    let alive = true;
+    const backfill = async () => {
+      if (!runId) return;
+      try {
+        const res = await request<{ events: AuditEvent[] }>(withQuery("/audit", { run_id: runId, limit: 200 }));
+        const events = res.events || [];
+        if (!alive) return;
+        if (events.length) {
+          setAudit(events.slice(-300));
+          setLiveEvents(events.slice().reverse().slice(0, 200));
+          setLastAuditTs(events[events.length - 1]?.timestamp || null);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    backfill();
+    return () => {
+      alive = false;
+    };
+  }, [runId, request]);
 
   useEffect(() => {
     refreshCycleView(runId, cycleId).catch(() => {});
@@ -216,6 +322,7 @@ export default function LivePage() {
         if (events.length) {
           since = events[events.length - 1]?.timestamp || since;
           setAudit((prev) => [...prev, ...events].slice(-300));
+          setLiveEvents((prev) => [...events, ...prev].slice(0, 200));
           // Refresh key panels when anything new arrives.
           await refreshCore(runId);
           await refreshTicker(runId);
@@ -291,22 +398,15 @@ export default function LivePage() {
           if ((msg as any).run_id) setRunId((msg as any).run_id);
           if ((msg as any).auth_enabled && !token) nav("/login");
         }
-        if (msg.type === "snapshot") {
-          const d = (msg as any).data || {};
-          setAgents(d.agents || []);
-          setProposals(d.proposals || []);
-          setDecisions(d.decisions || []);
-          setPnl(d.pnl_latest || null);
+        if (msg.type === "event") {
+          const e = (msg as any).data as AuditEvent;
+          if (e) {
+            setAudit((prev) => [...prev, e].slice(-300));
+            setLiveEvents((prev) => [e, ...prev].slice(0, 200));
+            setLastAuditTs(e.timestamp || null);
+            if (e.event_type === "market_snapshot_ready") refreshTicker(runId);
+          }
         }
-        if (msg.type === "audit") {
-          const events = (msg as any).data as AuditEvent[];
-          setAudit((prev) => [...prev, ...(events || [])].slice(-300));
-          const trigger = (events || []).some((e) => ["market_snapshot_ready"].includes(e.event_type));
-          if (trigger) refreshTicker(runId);
-        }
-        if (msg.type === "proposals") setProposals((msg as any).data || []);
-        if (msg.type === "decisions") setDecisions((msg as any).data || []);
-        if (msg.type === "pnl") setPnl((msg as any).data || null);
       };
     };
 
@@ -325,8 +425,10 @@ export default function LivePage() {
   }, [baseUrl, token, runId, liveMode]);
 
   useEffect(() => {
-    if (wsFailures >= 3) {
-      setLiveMode("polling");
+    // Do not auto-switch to polling: it feels inconsistent/flaky to users.
+    // Keep retrying WS, and allow an explicit user switch instead.
+    if (wsFailures >= 3 && liveMode === "ws") {
+      setWsHint("WebSocket is struggling to connect. You can switch to polling mode.");
     }
   }, [wsFailures]);
 
@@ -356,7 +458,29 @@ export default function LivePage() {
           <div className="text-[11px] uppercase tracking-widest text-[rgb(var(--muted))]">Total Account Value</div>
           <div className="mt-1 text-4xl font-semibold tabular-nums">${fmtMoney(firmEquity)}</div>
           <div className="mt-2 flex flex-col gap-1">
-            <div className="flex items-center gap-2">{connectionBadge}</div>
+            <div className="flex items-center gap-2">
+              {connectionBadge}
+              {liveMode === "ws" && wsFailures >= 3 ? (
+                <button
+                  type="button"
+                  onClick={() => setLiveMode("polling")}
+                  className="rounded-md border border-[rgb(var(--border))] bg-[rgb(var(--bg))] px-2 py-1 text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--fg))]"
+                >
+                  Use polling
+                </button>
+              ) : liveMode === "polling" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWsFailures(0);
+                    setLiveMode("ws");
+                  }}
+                  className="rounded-md border border-[rgb(var(--border))] bg-[rgb(var(--bg))] px-2 py-1 text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--fg))]"
+                >
+                  Try WebSocket
+                </button>
+              ) : null}
+            </div>
             {wsHint ? <div className="text-xs text-[rgb(var(--muted))]">{wsHint}</div> : null}
           </div>
         </div>
@@ -369,6 +493,20 @@ export default function LivePage() {
       </div>
 
       <TickerRow items={ticker} />
+
+      {/* Phase 12: Control Panel & Event Feed */}
+      <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-3">
+        <div className="h-full lg:col-span-1">
+          <ControlPanel
+            onStart={handleStart}
+            onStop={handleStop}
+            status={controlStatus}
+          />
+        </div>
+        <div className="h-full lg:col-span-2">
+          <EventFeed events={liveEvents} />
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Panel title="Session Insight" className="lg:col-span-2">
@@ -469,31 +607,45 @@ export default function LivePage() {
         </Panel>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Panel title="Audit (tail)">
-          <div className="max-h-72 overflow-auto rounded-lg border border-[rgb(var(--border))] bg-[rgb(var(--bg))]">
-            <table className="w-full border-collapse text-left text-xs">
-              <thead className="sticky top-0 bg-[rgb(var(--bg))]">
-                <tr className="border-b border-[rgb(var(--border))] text-[rgb(var(--muted))]">
-                  <th className="px-3 py-2">Time</th>
-                  <th className="px-3 py-2">Event</th>
-                  <th className="px-3 py-2">Agent</th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit.slice(-120).map((e) => (
-                  <tr key={e._id || e.timestamp} className="border-b border-[rgb(var(--border))]">
-                    <td className="px-3 py-2 font-mono">{new Date(e.timestamp).toLocaleTimeString()}</td>
-                    <td className="px-3 py-2 font-mono">{e.event_type}</td>
-                    <td className="px-3 py-2">{e.agent_id || "—"}</td>
+      <div className={`grid grid-cols-1 gap-4 ${showAudit ? "lg:grid-cols-2" : ""}`}>
+        {showAudit ? (
+          <Panel title="Audit (tail)">
+            <div className="max-h-72 overflow-auto rounded-lg border border-[rgb(var(--border))] bg-[rgb(var(--bg))]">
+              <table className="w-full border-collapse text-left text-xs">
+                <thead className="sticky top-0 bg-[rgb(var(--bg))]">
+                  <tr className="border-b border-[rgb(var(--border))] text-[rgb(var(--muted))]">
+                    <th className="px-3 py-2">Time</th>
+                    <th className="px-3 py-2">Event</th>
+                    <th className="px-3 py-2">Agent</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
+                </thead>
+                <tbody>
+                  {audit.slice(-120).map((e) => (
+                    <tr key={e._id || e.timestamp} className="border-b border-[rgb(var(--border))]">
+                      <td className="px-3 py-2 font-mono">{new Date(e.timestamp).toLocaleTimeString()}</td>
+                      <td className="px-3 py-2 font-mono">{e.event_type}</td>
+                      <td className="px-3 py-2">{e.agent_id || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Panel>
+        ) : null}
 
-        <Panel title="Decisions (latest)">
+        <Panel
+          title="Decisions (latest)"
+          right={
+            <button
+              type="button"
+              onClick={() => setShowAudit((v) => !v)}
+              className="rounded-md border border-[rgb(var(--border))] bg-[rgb(var(--bg))] px-2 py-1 text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--fg))]"
+              aria-pressed={!showAudit}
+            >
+              {showAudit ? "Hide audit" : "Show audit"}
+            </button>
+          }
+        >
           <div className="space-y-2">
             {decisions.slice(0, 6).map((d) => (
               <div key={d._id || `${d.timestamp}`} className="rounded-lg border border-[rgb(var(--border))] bg-[rgb(var(--bg))] p-3">

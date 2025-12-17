@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -30,6 +30,7 @@ from src.data.schemas import (
     TRADE_PROPOSALS,
 )
 from src.ui.auth import check_login, create_token, verify_token
+from src.ui.process_manager import ProcessManager
 
 
 def _parse_origins(value: str) -> List[str]:
@@ -273,6 +274,13 @@ class LoginResponse(BaseModel):
     expires_in: int
 
 
+class StartControlRequest(BaseModel):
+    run_id: Optional[str] = Field(default=None, description="Optional run identifier (server generates if omitted)")
+    traders: List[str] = Field(..., description="Enabled trader agent IDs")
+    cycles: int = Field(..., ge=1, le=10000, description="Maximum cycles to run")
+    dry_run: bool = Field(default=False, description="Skip execution (proposals/decisions only)")
+
+
 def create_app() -> FastAPI:
     # Uvicorn does not automatically load `.env` unless you pass `--env-file`.
     # For local/dev ergonomics, best-effort load here without overriding real env.
@@ -320,6 +328,51 @@ def create_app() -> FastAPI:
         await m.connect()
         rid = await _resolve_run_id(m, None)
         return {"ok": True, "time": utc_now().isoformat(), "run_id": rid, "auth_enabled": _auth_enabled()}
+
+    # === Control Endpoints (Phase 12) ===
+
+    @app.post("/control/start")
+    async def start_control(
+        req: StartControlRequest = Body(...),
+        _user: str = Depends(auth_user),
+        m: MongoManager = Depends(get_mongo),
+    ) -> Dict[str, Any]:
+        """Start orchestrator with custom trader selection and cycle limit."""
+        try:
+            await m.connect()
+            pm = await ProcessManager.get_instance(m)
+            return await pm.start_orchestrator(
+                run_id=req.run_id,
+                traders=req.traders,
+                cycles=req.cycles,
+                dry_run=req.dry_run,
+            )
+        except Exception as e:
+            return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+    @app.post("/control/stop")
+    async def stop_control(
+        _user: str = Depends(auth_user),
+        m: MongoManager = Depends(get_mongo),
+    ) -> Dict[str, Any]:
+        """Stop running orchestrator gracefully."""
+        await m.connect()
+        pm = await ProcessManager.get_instance(m)
+        result = await pm.stop_orchestrator()
+        return result
+
+    @app.get("/control/status")
+    async def control_status(
+        _user: str = Depends(auth_user),
+        m: MongoManager = Depends(get_mongo),
+    ) -> Dict[str, Any]:
+        """Get current orchestrator status and progress."""
+        await m.connect()
+        pm = await ProcessManager.get_instance(m)
+        result = await pm.get_status()
+        return result
+
+    # === End Control Endpoints ===
 
     @app.post("/auth/login", response_model=LoginResponse)
     async def login(req: LoginRequest) -> LoginResponse:
@@ -714,6 +767,8 @@ def create_app() -> FastAPI:
         websocket: WebSocket,
         run_id: Optional[str] = None,
         token: Optional[str] = None,
+        since_id: Optional[str] = None,
+        since_ts: Optional[str] = None,
     ) -> None:
         if _auth_enabled():
             claims = verify_token(token=token or "")
@@ -723,29 +778,28 @@ def create_app() -> FastAPI:
         await websocket.accept()
         m: MongoManager = app.state.mongo
         rid = await _resolve_run_id(m, run_id)
-        poll_s = float(os.getenv("UI_WS_POLL_INTERVAL_S", "1.0"))
+        poll_s = float(os.getenv("UI_WS_POLL_INTERVAL_S", "0.5"))
 
+        # Event-stream only: client can resume via since_id/since_ts.
         last_ts = utc_now()
         last_id: Optional[ObjectId] = None
+        if since_id:
+            try:
+                last_id = ObjectId(str(since_id))
+                # When resuming by _id only, keep timestamp comparison wide; the $or query below handles ordering.
+                last_ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            except Exception:
+                last_id = None
+        elif since_ts:
+            try:
+                dt = datetime.fromisoformat(str(since_ts).replace("Z", "+00:00"))
+                last_ts = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                pass
 
         async def send_json(obj: Dict[str, Any]) -> None:
             await websocket.send_json(_json_safe(obj))
 
-        # Initial snapshot (lightweight)
-        agents_doc = await m.collection(AGENT_STATES).find({}).sort("agent_id", 1).to_list(length=200)
-        proposals_doc = (
-            await m.collection(TRADE_PROPOSALS).find({"run_id": rid}).sort("timestamp", -1).limit(30).to_list(length=30)
-            if rid
-            else []
-        )
-        decisions_doc = (
-            await m.collection(MANAGER_DECISIONS).find({"run_id": rid}).sort("timestamp", -1).limit(10).to_list(length=10)
-            if rid
-            else []
-        )
-        pnl_doc = (
-            await m.collection(PNL_REPORTS).find_one({"run_id": rid}, sort=[("timestamp", -1)]) if rid else None
-        )
         await send_json(
             {
                 "type": "hello",
@@ -754,22 +808,11 @@ def create_app() -> FastAPI:
                 "auth_enabled": _auth_enabled(),
             }
         )
-        await send_json(
-            {
-                "type": "snapshot",
-                "data": {
-                    "agents": [_serialize_doc(d) for d in (agents_doc or [])],
-                    "proposals": [_serialize_doc(d) for d in (proposals_doc or [])],
-                    "decisions": [_serialize_doc(d) for d in (decisions_doc or [])],
-                    "pnl_latest": _serialize_doc(pnl_doc) if pnl_doc else None,
-                },
-            }
-        )
-
         try:
             while True:
-                # Tail audit_log for this run_id
+                # Tail audit_log for this run_id. If absent, keep trying to resolve.
                 if not rid:
+                    rid = await _resolve_run_id(m, run_id)
                     await asyncio.sleep(poll_s)
                     continue
                 q: Dict[str, Any] = {"run_id": rid}
@@ -794,30 +837,9 @@ def create_app() -> FastAPI:
                         last_ts = last_ts_v if last_ts_v.tzinfo else last_ts_v.replace(tzinfo=timezone.utc)
                     if isinstance(last_doc.get("_id"), ObjectId):
                         last_id = last_doc["_id"]
-                    await send_json({"type": "audit", "data": [_serialize_doc(d) for d in docs]})
-
-                    event_types = {str(d.get("event_type") or "") for d in docs if isinstance(d, dict)}
-                    if "trader_proposals_ready" in event_types:
-                        proposals_doc = (
-                            await m.collection(TRADE_PROPOSALS)
-                            .find({"run_id": rid})
-                            .sort("timestamp", -1)
-                            .limit(30)
-                            .to_list(length=30)
-                        )
-                        await send_json({"type": "proposals", "data": [_serialize_doc(d) for d in (proposals_doc or [])]})
-                    if "manager_decision_ready" in event_types or "manager_decisions_ready" in event_types:
-                        decisions_doc = (
-                            await m.collection(MANAGER_DECISIONS)
-                            .find({"run_id": rid})
-                            .sort("timestamp", -1)
-                            .limit(10)
-                            .to_list(length=10)
-                        )
-                        await send_json({"type": "decisions", "data": [_serialize_doc(d) for d in (decisions_doc or [])]})
-                    if "pnl_report_generated" in event_types:
-                        pnl_doc = await m.collection(PNL_REPORTS).find_one({"run_id": rid}, sort=[("timestamp", -1)])
-                        await send_json({"type": "pnl", "data": _serialize_doc(pnl_doc) if pnl_doc else None})
+                    # Event-stream only: emit one message per audit document in-order.
+                    for d in docs:
+                        await send_json({"type": "event", "data": _serialize_doc(d)})
                 await asyncio.sleep(poll_s)
         except WebSocketDisconnect:
             return

@@ -44,6 +44,8 @@ export type PnlHistoryResponse = { run_id: string | null; reports: PnlReport[] }
 
 export type AuditEvent = {
   _id?: string;
+  run_id?: string;
+  cycle_id?: string | null;
   timestamp: string;
   event_type: string;
   agent_id?: string;
