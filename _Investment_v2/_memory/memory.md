@@ -1,0 +1,109 @@
+# Project Memory Log & Roadmap
+
+**Date:** December 18, 2025
+**Project:** Autonomous Investment Agent (MSc Data Science Thesis)
+**Current Phase:** Multi-Agent Architecture & Prototype Validation
+
+## 1. Project Overview & Goal
+The ultimate goal is to build a flagship **Autonomous Coding Agent** for crypto trading. Unlike standard "black box" trading bots, this agent uses a **"CodeAct"** architecture (Think-Code-Observe) to perform rigorous, verifiable quantitative analysis in a Python sandbox before making decisions.
+
+**Key Thesis differentiator:** The agent does not just "predict"; it **researches**, writes code to validate hypotheses, and executes based on data-driven evidence.
+
+## 2. Architecture Implemented
+We have established a robust **Manager-Worker** architecture to solve the "Context Window" and "Hallucination" problems.
+
+### **A. The Manager Agent (`agent/manager.py`)**
+*   **Role:** Portfolio Manager & Risk Controller.
+*   **Responsibility:** High-level strategy, capital allocation, and final decision making.
+*   **State:** Holds the "Long Term Memory" (Portfolio State, Market Context).
+*   **Tools:**
+    *   `get_portfolio_state()`: Real-time balance and positions.
+    *   `get_market_snapshot(symbol)`: Instant price/change data.
+    *   `consult_quant_researcher(question)`: The bridge to the Quant Agent.
+    *   `execute_order(symbol, side, amount)`: Execution (Market orders).
+
+### **B. The Quant Researcher (`agent/core.py`)**
+*   **Role:** Execution Specialist & Data Analyst.
+*   **Responsibility:** Answering specific questions by writing and executing Python code.
+*   **Architecture:** **CodeAct** (Iterative Think -> Code -> Observe loop).
+*   **Key Feature:** **Fresh Context**. Every time the Manager calls the Quant, the Quant starts with a blank slate. This ensures high accuracy, zero context bloat from previous tasks, and "fresh eyes" on the data.
+*   **Self-Correction:** Validated capability to catch syntax errors (e.g., extra parenthesis) and library errors (e.g., Pandas indexing) and self-heal during the analysis loop.
+
+### **C. The Tooling Layer (`tools/market_data.py`)**
+*   **Wrapper:** Custom `BinanceTestnetWrapper` mimicking `ccxt` but using `python-binance` for stability on the Futures Testnet.
+*   **Status:** Fully functional for OHLCV fetching, Ticker data, and Account Balance.
+
+## 3. Accomplishments & Verification
+
+### **Phase 1: Core Logic (CLI)**
+*   **[DONE] Connection:** Successfully connected to Binance Futures Testnet (Balance: ~10k USDT).
+*   **[DONE] Unit Testing:** Verified `fetch_ohlcv` and `fetch_balance` via `tests/test_binance.py`.
+*   **[DONE] Manager Tools:** Fixed attribute errors in `fetch_ticker` and standardized `fetch_balance` to support both `['USDT']['free']` and `['free']['USDT']` access patterns.
+*   **[DONE] End-to-End Workflow:** Manager -> Quant (9-turn analysis) -> Manager Decision.
+
+### **Phase 2: The "Glass" Interface (UI/UX)**
+*   **[DONE] Architecture Shift:** Refactored agents from `print()` logging to **Generator-based Event Streaming**.
+*   **[DONE] Backend:** Built a **FastAPI** server with WebSocket (`/ws/chat`) support, Robust CORS, and Health Checks (`/health`).
+*   **[DONE] Frontend:** Developed a **Next.js 14** "Glass" Interface:
+    *   **Majestic UI:** Split-pane layout (Chat Stream vs. Code/Artifact Viewer).
+    *   **Real-time Streaming:** Nested visualization of Manager delegating to Quant.
+    *   **Smart Rendering:** `react-markdown` for thought chains, collapsible chips for Tool Calls, and auto-switching tabs (Code/Console).
+    *   **UX Polish:** "System Ready" indicators, User message injection, and clean error handling.
+
+## 4. Critical Focus Area: Context & Memory Management
+**This is the key success factor for the Thesis.**
+
+*   **Challenge:** As the Manager runs for days, its context window will fill up with tool outputs and Quant reports.
+*   **Solution Required:** We cannot just append forever. We need:
+    1.  **Summarization:** After every ~5 turns, condense the history into a "Narrative State".
+    2.  **Structured Memory:** A database (JSON/SQLite) to store "Active Hypotheses", "Pending Orders", and "Daily P&L" so the Manager can look them up instead of remembering them in the context window.
+    3.  **Token Optimization:** Stripping verbose tool outputs (like raw JSON of 500 candles) before passing them to the Manager.
+
+## 5. Next Steps
+1.  **Context Management:** Implement the "Context Cleaner" logic to prevent overflow during long sessions.
+2.  **Live Trading Verification:** Execute a real test trade (Buy/Sell) via the UI to verify `execute_order` in the loop.
+3.  **Database Integration:** Move from ephemeral logs to a persistent database (e.g., SQLite or MongoDB).
+4.  **Risk Module:** Implement hard-coded risk checks (e.g., Max Drawdown, Max Position Size) in `agent/manager.py`.
+
+## 6. Current Status
+*   **System Health:** **Excellent (Green)**.
+*   **Interface:** **Live & Polished (Phase 2 Complete)**.
+*   **Testnet Funds:** ~10,768 USDT / 0.01 BTC Long.
+*   **Immediate Action:** Ready for Context Engineering and Long-running tests.
+
+## Update — Persistence & Autonomous Loop (2025-12-18)
+
+Small operational update after adding persistent storage and the autonomous cycle loop:
+
+- **Database:** Added MongoDB persistence using `motor`.
+    - **DB name:** `investment_agent_v2`.
+    - **Collections:** `sessions` and `cycles` (each cycle embeds the generated `memory_generated`).
+    - Files: `database/connection.py`, `database/models.py` were added to define the connection and Pydantic schemas.
+
+- **Agent Memory Schema:** The summariser now emits structured JSON matching `AgentMemory` with fields:
+    - `short_term_summary` (string)
+    - `active_hypotheses` (list of strings)
+    - `pending_orders` (list of strings)
+    - `next_steps` (string)
+
+- **Autonomous Loop:** Implemented a background loop in `server/main.py` that:
+    1. Checks for an active `session` document.
+    2. Loads the latest cycle memory and injects it into the Manager's system prompt.
+    3. Creates a new `cycle` document, streams events live via WebSocket, and saves the cycle when complete.
+
+- **Cycle Cadence:** Controlled by env var `CYCLE_CADENCE` (minutes). Default added to `.env` as `CYCLE_CADENCE=10`.
+
+- **API Endpoints (new):**
+    - `POST /start` — create and start a session (accepts `initial_balance`).
+    - `POST /stop` — stop the active session.
+    - `GET /history` — list recent sessions.
+    - `GET /session/{session_id}` — return cycles for a session.
+
+- **WebSocket:** The frontend now subscribes to a live `ws_manager` broadcast (no longer starting new conversational threads). The `/ws/chat` route joins the live feed.
+
+- **Requirements:** `motor` added to `requirements.txt` for async MongoDB access.
+
+Next suggested steps:
+- Add an optional dedicated `memories` collection (currently memory is embedded in `cycles.memory_generated`).
+- Frontend: add a Session control panel (Start/Stop), Cycle history sidebar, and P&L graph using stored snapshots.
+- Add tests for DB read/write and summariser JSON validation.

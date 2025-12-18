@@ -1,0 +1,15 @@
+openai
+pydantic
+ccxt
+pandas
+pandas_ta
+python-dotenv
+termcolor
+python-binance
+fastapi
+uvicorn
+python-multipart
+websockets
+wsproto
+motor
+tiktoken
