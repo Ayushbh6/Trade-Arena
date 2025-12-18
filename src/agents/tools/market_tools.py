@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from ...config import load_config
 from ...data.market_data import MarketDataIngestor
 from ...data.mongo import MongoManager, jsonify, utc_now
-from ...data.schemas import MARKET_SNAPSHOTS, NEWS_EVENTS, POSITIONS, ORDERS, AGENT_STATES
+from ...data.schemas import MARKET_SNAPSHOTS, NEWS_EVENTS, POSITIONS, ORDERS, AGENT_STATES, AGENT_LEDGERS
 from ...features.market_state import MarketStateBuilder
 from .context import ToolContext
 
@@ -218,16 +218,19 @@ async def get_firm_state(
     ctx = context or ToolContext()
     cfg = ctx.config or load_config()
 
+    # MVP canonical trader roster used by the orchestrator.
+    canonical_traders = ["tech_trader_1", "tech_trader_2", "macro_trader_1", "structure_trader_1"]
+    firm_capital = float(getattr(cfg.risk, "firm_capital_usd", 0.0) or 0.0)
+    if firm_capital <= 0:
+        firm_capital = float(cfg.risk.agent_budget_notional_usd) * float(len(canonical_traders))
+    per_agent_budget = firm_capital / float(len(canonical_traders)) if canonical_traders else float(cfg.risk.agent_budget_notional_usd)
+
     firm: Dict[str, Any] = {
-        "capital_usdt": cfg.risk.agent_budget_notional_usd * max(
-            1, len(cfg.models.trader_models) or 1
-        ),
+        "capital_usdt": firm_capital,
         "total_notional_usdt": 0.0,
         "drawdown_pct": 0.0,
         "risk_limits": cfg.risk.__dict__,
-        "agent_budgets": {
-            k: cfg.risk.agent_budget_notional_usd for k in (cfg.models.trader_models or {})
-        },
+        "agent_budgets": {k: per_agent_budget for k in canonical_traders},
     }
 
     if ctx.mongo is None:
@@ -247,6 +250,22 @@ async def get_firm_state(
             if aid:
                 budgets[aid] = s.get("budget_usdt", cfg.risk.agent_budget_notional_usd)
         firm["agent_budgets"] = budgets or firm["agent_budgets"]
+
+    # Attach latest per-agent ledgers if available (newest per agent_id).
+    try:
+        lq: Dict[str, Any] = {}
+        if data_run_id:
+            lq["run_id"] = data_run_id
+        docs = await ctx.mongo.collection(AGENT_LEDGERS).find(lq).sort("timestamp", -1).limit(100).to_list(length=100)
+        ledgers: Dict[str, Any] = {}
+        for d in docs or []:
+            aid = d.get("agent_id")
+            if aid and str(aid) not in ledgers:
+                ledgers[str(aid)] = jsonify(d)
+        if ledgers:
+            firm["agent_ledgers"] = ledgers
+    except Exception:
+        pass
 
     return jsonify(firm)
 

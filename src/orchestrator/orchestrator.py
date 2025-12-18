@@ -34,6 +34,7 @@ from src.execution.binance_client import BinanceFuturesClient
 from src.execution.executor import ExecutorConfig, OrderExecutor
 from src.execution.planner import OrderPlanError, build_order_plan
 from src.execution.position_tracker import PositionTracker
+from src.portfolio.agent_ledger import AgentLedgerManager
 from src.execution.schemas import ExecutionStatus
 from src.features.market_state import MarketStateBuilder
 from src.portfolio.portfolio import PortfolioManager
@@ -403,24 +404,45 @@ class Orchestrator:
 
         # Initialize portfolios if needed
         if self.portfolio_manager:
-            budget_notional = float(self.config.risk.agent_budget_notional_usd)
-            if trader_1.agent_id not in self.portfolio_manager.portfolios:
-                self.portfolio_manager.initialize_agent(trader_1.agent_id, budget_notional)
-            if trader_2.agent_id not in self.portfolio_manager.portfolios:
-                self.portfolio_manager.initialize_agent(trader_2.agent_id, budget_notional)
-            if macro_1.agent_id not in self.portfolio_manager.portfolios:
-                self.portfolio_manager.initialize_agent(macro_1.agent_id, budget_notional)
-            if structure_1.agent_id not in self.portfolio_manager.portfolios:
-                self.portfolio_manager.initialize_agent(structure_1.agent_id, budget_notional)
+            active_traders_all = [trader_1.agent_id, trader_2.agent_id, macro_1.agent_id, structure_1.agent_id]
+            enabled = set(self.orchestrator_config.enabled_traders or []) if self.orchestrator_config.enabled_traders else None
+            active_traders = [t for t in active_traders_all if (enabled is None or t in enabled)]
+            if not active_traders:
+                active_traders = active_traders_all
+
+            firm_capital = float(getattr(self.config.risk, "firm_capital_usd", 0.0) or 0.0) or float(
+                sum((firm_state_dict.get("agent_budgets") or {}).values()) or 0.0
+            )
+            per_agent_budget = firm_capital / float(len(active_traders)) if firm_capital and active_traders else float(
+                self.config.risk.agent_budget_notional_usd
+            )
+
+            for aid in active_traders:
+                if aid not in self.portfolio_manager.portfolios:
+                    self.portfolio_manager.initialize_agent(aid, float(per_agent_budget))
 
         # Ensure firm budgets map aligns with actual agent_ids used in this run.
+        active_traders_all = [trader_1.agent_id, trader_2.agent_id, macro_1.agent_id, structure_1.agent_id]
+        enabled = set(self.orchestrator_config.enabled_traders or []) if self.orchestrator_config.enabled_traders else None
+        active_traders = [t for t in active_traders_all if (enabled is None or t in enabled)]
+        if not active_traders:
+            active_traders = active_traders_all
+
+        firm_capital = float(getattr(self.config.risk, "firm_capital_usd", 0.0) or 0.0) or float(
+            sum((firm_state_dict.get("agent_budgets") or {}).values()) or 0.0
+        )
+        # If firm_capital isn't configured, fall back to the previous behavior.
+        if not firm_capital:
+            firm_capital = float(self.config.risk.agent_budget_notional_usd) * float(len(active_traders))
+
+        per_agent_budget = firm_capital / float(len(active_traders)) if active_traders else float(self.config.risk.agent_budget_notional_usd)
+
         budgets = dict(firm_state_dict.get("agent_budgets") or {})
-        budgets[trader_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
-        budgets[trader_2.agent_id] = float(self.config.risk.agent_budget_notional_usd)
-        budgets[macro_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
-        budgets[structure_1.agent_id] = float(self.config.risk.agent_budget_notional_usd)
+        for aid in active_traders:
+            budgets[aid] = float(per_agent_budget)
         firm_state_dict["agent_budgets"] = budgets
-        firm_state_dict["capital_usdt"] = float(sum(budgets.values())) if budgets else firm_state_dict.get("capital_usdt")
+        firm_state_dict["capital_usdt"] = float(firm_capital)
+        per_agent_budget_map = {aid: float(per_agent_budget) for aid in active_traders}
 
         async def _safe_trader(trader: Any, *, model: str) -> TradeProposal:
             try:
@@ -636,6 +658,31 @@ class Orchestrator:
                     {"cycle_id": cycle_id, "intents": [i.model_dump(mode="json") for i in plan.intents]},
                     ctx=audit_ctx,
                 )
+
+                # Deterministic per-agent ledger derived from the approved plan.
+                ledger_mgr = AgentLedgerManager(mongo=self.mongo)
+                ledgers = await ledger_mgr.compute_from_plan(
+                    run_id=run_id,
+                    plan=plan,
+                    firm_capital_usdt=float(firm_capital),
+                    per_agent_budget_usdt=per_agent_budget_map,
+                )
+                firm_state_dict["agent_ledgers"] = {k: v.to_doc(cycle_id=cycle_id) for k, v in ledgers.items()}
+                await ledger_mgr.persist(run_id=run_id, cycle_id=cycle_id, ledgers=ledgers)
+                await audit.log(
+                    "agent_ledgers_updated",
+                    {
+                        "cycle_id": cycle_id,
+                        "ledgers": {
+                            k: {
+                                "reserved_margin_usdt": v.reserved_margin_usdt,
+                                "available_budget_usdt": v.available_budget_usdt,
+                            }
+                            for k, v in ledgers.items()
+                        },
+                    },
+                    ctx=audit_ctx,
+                )
             except OrderPlanError as e:
                 await audit.log(
                     "order_plan_error",
@@ -694,6 +741,19 @@ class Orchestrator:
                         {"cycle_id": cycle_id},
                         ctx=audit_ctx,
                     )
+
+                    # Reconcile ledgers against observed positions (best-effort attribution).
+                    if plan is not None:
+                        ledger_mgr = AgentLedgerManager(mongo=self.mongo)
+                        ledgers = await ledger_mgr.compute_from_plan(
+                            run_id=run_id,
+                            plan=plan,
+                            firm_capital_usdt=float(firm_capital),
+                            per_agent_budget_usdt=per_agent_budget_map,
+                        )
+                        ledgers = await ledger_mgr.reconcile_with_positions(run_id=run_id, ledgers=ledgers)
+                        firm_state_dict["agent_ledgers"] = {k: v.to_doc(cycle_id=cycle_id) for k, v in ledgers.items()}
+                        await ledger_mgr.persist(run_id=run_id, cycle_id=cycle_id, ledgers=ledgers)
             except Exception as e:  # pylint: disable=broad-exception-caught
                 execution_status = f"error:{e}"
                 await audit.log(

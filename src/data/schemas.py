@@ -36,6 +36,7 @@ AUDIT_LOG = "audit_log"
 AGENT_CONTEXT_STATES = "agent_context_states"
 LOCKS = "locks"
 RUN_SESSIONS = "run_sessions"
+AGENT_LEDGERS = "agent_ledgers"
 
 # Added for full LLM observability (raw request/response + metadata)
 LLM_CALLS = "llm_calls"
@@ -162,6 +163,14 @@ COLLECTION_SPECS: Dict[str, CollectionSpec] = {
             (("run_id", ASCENDING),),
             (("status", ASCENDING), ("updated_at", DESCENDING)),
             (("created_at", DESCENDING),),
+        ),
+    ),
+    AGENT_LEDGERS: CollectionSpec(
+        name=AGENT_LEDGERS,
+        required_keys=("run_id", "agent_id", "timestamp"),
+        indexes=(
+            (("run_id", ASCENDING), ("agent_id", ASCENDING), ("timestamp", DESCENDING)),
+            (("run_id", ASCENDING), ("timestamp", DESCENDING)),
         ),
     ),
 }
