@@ -1,13 +1,23 @@
-import React from 'react';
-import { LayoutDashboard, Focus, X } from 'lucide-react';
+import React, { useState } from 'react';
+import { LayoutDashboard, Focus, X, ChevronDown, User, Bot } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 
 interface SidebarProps {
     isOpen: boolean;
     onClose: () => void;
+    currentView: 'dashboard' | 'focus';
+    onNavigate: (view: 'dashboard' | 'focus') => void;
 }
 
-export function Sidebar({ isOpen, onClose }: SidebarProps) {
+export function Sidebar({ isOpen, onClose, currentView, onNavigate }: SidebarProps) {
+    const [isFocusOpen, setIsFocusOpen] = useState(true);
+
+    const handleNav = (view: 'dashboard' | 'focus') => {
+        onNavigate(view);
+        if (view === 'focus') setIsFocusOpen(true);
+        // Optional: onClose(); if we want to close sidebar on selection
+    };
+
     return (
         <div
             className={`
@@ -19,7 +29,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
             `}
         >
             {/* Header */}
-            <div className="h-14 flex items-center justify-between px-6 border-b border-white/10 flex-none">
+            <div className="h-14 flex items-center justify-between px-6 border-b border-white/10 flex-none bg-black/20">
                 <span className="font-medium text-sm text-white/90 tracking-wide">Navigation</span>
                 <Button
                     variant="ghost"
@@ -32,22 +42,58 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
             </div>
 
             {/* Menu Items */}
-            <div className="flex-1 p-4 space-y-2">
+            <div className="flex-1 p-4 space-y-1">
                 <Button
                     variant="ghost"
-                    className="w-full justify-start text-white/70 hover:text-white hover:bg-white/5 h-12"
+                    onClick={() => handleNav('dashboard')}
+                    className={`w-full justify-start h-12 mb-2 ${currentView === 'dashboard' ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
                 >
                     <LayoutDashboard className="h-5 w-5 mr-3" />
-                    Dashboard
+                    Investment Dashboard
                 </Button>
 
-                <Button
-                    variant="ghost"
-                    className="w-full justify-start text-white/70 hover:text-white hover:bg-white/5 h-12"
-                >
-                    <Focus className="h-5 w-5 mr-3" />
-                    Focus
-                </Button>
+                {/* Focus Group */}
+                <div className="space-y-1 pt-2 border-t border-white/5">
+                    <Button
+                        variant="ghost"
+                        onClick={() => setIsFocusOpen(!isFocusOpen)}
+                        className={`w-full justify-between h-12 ${currentView === 'focus' ? 'text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                    >
+                        <div className="flex items-center">
+                            <Focus className="h-5 w-5 mr-3" />
+                            Active Agents
+                        </div>
+                        <ChevronDown className={`h-4 w-4 transition-transform ${isFocusOpen ? 'rotate-180' : ''}`} />
+                    </Button>
+
+                    {/* Submenu */}
+                    {isFocusOpen && (
+                        <div className="pl-4 space-y-1 animate-in slide-in-from-top-1 fade-in duration-200">
+                            <Button
+                                variant="ghost"
+                                onClick={() => handleNav('focus')}
+                                className={`w-full justify-start h-10 text-sm ${currentView === 'focus' ? 'bg-indigo-500/20 text-indigo-300' : 'text-white/40 hover:text-white/80 hover:bg-white/5'}`}
+                            >
+                                <Bot className="h-4 w-4 mr-3" />
+                                Quant Trader 1
+                                <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">LIVE</span>
+                            </Button>
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Footer User Profile (Mock) */}
+            <div className="p-4 border-t border-white/10">
+                <div className="flex items-center gap-3 p-2 rounded-lg bg-white/5">
+                    <div className="h-8 w-8 rounded-full bg-indigo-500 flex items-center justify-center text-white">
+                        <User className="h-4 w-4" />
+                    </div>
+                    <div>
+                        <div className="text-xs font-medium text-white">Guest User</div>
+                        <div className="text-[10px] text-white/40">Basic Plan</div>
+                    </div>
+                </div>
             </div>
         </div>
     );

@@ -25,3 +25,12 @@ export interface AgentEvent {
   timestamp?: string; // We can add this on receive
   usage?: TokenUsage;
 }
+
+export interface TradingSession {
+  id: string;
+  start_time: string;
+  status: string;
+  config: Record<string, any>;
+  initial_balance: number;
+  current_balance: number;
+}

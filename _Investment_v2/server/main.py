@@ -268,6 +268,13 @@ async def run_agent_once():
     return {"status": "starting_single_run", "session_id": session.id}
 
 
+@app.get("/session/active")
+async def get_active_session_details():
+    session = await Database.get_active_session()
+    if session:
+        return session.model_dump()
+    return {"status": "no_active_session"}
+
 @app.get("/history")
 async def get_history():
     # Return list of sessions

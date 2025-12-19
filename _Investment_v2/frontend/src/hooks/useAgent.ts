@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { AgentEvent } from '@/types/agent';
+import { AgentEvent, TradingSession } from '@/types/agent';
 
 export function useAgent() {
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -10,6 +10,7 @@ export function useAgent() {
     manager: { prompt: 0, completion: 0, total: 0 },
     quant: { prompt: 0, completion: 0, total: 0 }
   });
+  const [activeSession, setActiveSession] = useState<TradingSession | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -27,7 +28,17 @@ export function useAgent() {
       try {
         const baseUrl = getBaseUrl();
         const res = await fetch(`http://${baseUrl}/health`);
-        if (res.ok) setIsServerReady(true);
+        if (res.ok) {
+          setIsServerReady(true);
+          // Also fetch active session
+          const sessionRes = await fetch(`http://${baseUrl}/session/active`);
+          const sessionData = await sessionRes.json();
+          if (sessionData && sessionData.id) {
+            setActiveSession(sessionData);
+          } else {
+            setActiveSession(null);
+          }
+        }
       } catch (e) {
         console.error("Server offline", e);
         setIsServerReady(false);
@@ -184,6 +195,7 @@ export function useAgent() {
     startCycle,
     stopCycle,
     runOnce,
-    disconnect
+    disconnect,
+    activeSession
   };
 }

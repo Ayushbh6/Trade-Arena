@@ -7,12 +7,14 @@ import { ArtifactViewer } from "@/components/agent/ArtifactViewer";
 import { TokenCounter } from "@/components/agent/TokenCounter";
 import { RunControl } from "@/components/agent/RunControl";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { Dashboard } from "@/components/dashboard/Dashboard";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Loader2, Sparkles, Command } from "lucide-react";
 
 export default function Home() {
-  const { events, isConnected, isServerReady, isRunning, connectAndRun, disconnect, tokenCounts, startCycle, stopCycle, runOnce } = useAgent();
+  const { events, isConnected, isServerReady, isRunning, connectAndRun, disconnect, tokenCounts, startCycle, stopCycle, runOnce, activeSession } = useAgent();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [currentView, setCurrentView] = useState<'dashboard' | 'focus'>('dashboard');
 
   // Determine status label and color
   const getStatus = () => {
@@ -26,7 +28,15 @@ export default function Home() {
   return (
     <main className="h-screen w-screen bg-black text-white overflow-hidden flex flex-col font-sans selection:bg-indigo-500/30 relative">
       {/* Sidebar & Overlay */}
-      <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
+        currentView={currentView}
+        onNavigate={(view) => {
+          setCurrentView(view);
+          setIsSidebarOpen(false);
+        }}
+      />
 
       {/* Backdrop Blur Overlay */}
       <div
@@ -66,35 +76,39 @@ export default function Home() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden z-0">
-        <ResizablePanelGroup orientation="horizontal" className="h-full w-full">
+        {currentView === 'dashboard' ? (
+          <Dashboard events={events} activeSession={activeSession} />
+        ) : (
+          <ResizablePanelGroup orientation="horizontal" className="h-full w-full">
 
-          {/* Left Panel: Chat/Feed */}
-          <ResizablePanel defaultSize={50} minSize={30} className="bg-black border-r border-white/10 relative">
-            <div className="h-full flex flex-col">
-              <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
-                {events.length === 0 ? (
-                  <div className="h-full flex flex-col items-center justify-center text-white/30 p-8 text-center">
-                    <div className="h-20 w-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 border border-white/5">
-                      <Sparkles className="h-10 w-10 text-white/20" />
+            {/* Left Panel: Chat/Feed */}
+            <ResizablePanel defaultSize={50} minSize={30} className="bg-black border-r border-white/10 relative">
+              <div className="h-full flex flex-col">
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
+                  {events.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-white/30 p-8 text-center">
+                      <div className="h-20 w-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 border border-white/5">
+                        <Sparkles className="h-10 w-10 text-white/20" />
+                      </div>
+                      <h3 className="font-medium text-lg text-white/80 mb-2">Agent Idle</h3>
+                      <p className="text-sm max-w-xs leading-relaxed text-white/50">Awaiting your command to analyze markets and execute strategies.</p>
                     </div>
-                    <h3 className="font-medium text-lg text-white/80 mb-2">Agent Idle</h3>
-                    <p className="text-sm max-w-xs leading-relaxed text-white/50">Awaiting your command to analyze markets and execute strategies.</p>
-                  </div>
-                ) : (
-                  <AgentFeed events={events} />
-                )}
+                  ) : (
+                    <AgentFeed events={events} />
+                  )}
+                </div>
               </div>
-            </div>
-          </ResizablePanel>
+            </ResizablePanel>
 
-          <ResizableHandle withHandle className="bg-white/5 hover:bg-white/10 transition-colors w-1.5" />
+            <ResizableHandle withHandle className="bg-white/5 hover:bg-white/10 transition-colors w-1.5" />
 
-          {/* Right Panel: Artifacts/Work */}
-          <ResizablePanel defaultSize={50} minSize={30} className="bg-neutral-950/50">
-            <ArtifactViewer events={events} />
-          </ResizablePanel>
+            {/* Right Panel: Artifacts/Work */}
+            <ResizablePanel defaultSize={50} minSize={30} className="bg-neutral-950/50">
+              <ArtifactViewer events={events} />
+            </ResizablePanel>
 
-        </ResizablePanelGroup>
+          </ResizablePanelGroup>
+        )}
       </div>
     </main>
   );
