@@ -10,7 +10,7 @@ export function useAgent() {
     manager: { prompt: 0, completion: 0, total: 0 },
     quant: { prompt: 0, completion: 0, total: 0 }
   });
-  
+
   const wsRef = useRef<WebSocket | null>(null);
 
   // Helper to get API base URL dynamically
@@ -33,7 +33,7 @@ export function useAgent() {
         setIsServerReady(false);
       }
     };
-    
+
     checkHealth();
     const interval = setInterval(checkHealth, 5000); // Poll every 5s
     return () => clearInterval(interval);
@@ -56,34 +56,34 @@ export function useAgent() {
         const data = JSON.parse(event.data) as AgentEvent;
         // Add local timestamp
         const eventWithTime = { ...data, timestamp: new Date().toISOString() };
-        
+
         setEvents((prev) => [...prev, eventWithTime]);
-        
+
         if (data.usage) {
-            setTokenCounts(prev => {
-                const source = data.source;
-                if (source !== 'manager' && source !== 'quant') return prev;
-                
-                const target = source as 'manager' | 'quant';
-                
-                return {
-                    ...prev,
-                    [target]: {
-                        prompt: prev[target].prompt + (data.usage?.prompt_tokens || 0),
-                        completion: prev[target].completion + (data.usage?.completion_tokens || 0),
-                        total: prev[target].total + (data.usage?.total_tokens || 0)
-                    }
-                };
-            });
+          setTokenCounts(prev => {
+            const source = data.source;
+            if (source !== 'manager' && source !== 'quant') return prev;
+
+            const target = source as 'manager' | 'quant';
+
+            return {
+              ...prev,
+              [target]: {
+                prompt: prev[target].prompt + (data.usage?.prompt_tokens || 0),
+                completion: prev[target].completion + (data.usage?.completion_tokens || 0),
+                total: prev[target].total + (data.usage?.total_tokens || 0)
+              }
+            };
+          });
         }
 
         if (data.type === 'system' && data.metadata?.status === 'done') {
           setIsRunning(false);
         }
-        
+
         // Handle stop event
         if (data.type === 'system' && data.content.includes("stopped")) {
-            setIsRunning(false);
+          setIsRunning(false);
         }
       } catch (e) {
         console.error('Error parsing event:', e);
@@ -106,47 +106,47 @@ export function useAgent() {
   const connectAndRun = useCallback((prompt: string) => {
     // Reset state but keep the user prompt visible immediately
     const userEvent: AgentEvent = {
-        type: "info", 
-        source: "user",
-        content: prompt,
-        timestamp: new Date().toISOString()
+      type: "info",
+      source: "user",
+      content: prompt,
+      timestamp: new Date().toISOString()
     };
-    
+
     setEvents((prev) => [...prev, userEvent]);
     setIsRunning(true);
-    
+
     connect();
-    
+
     // Wait for connection then send
     const waitForOpen = setInterval(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ prompt }));
-            clearInterval(waitForOpen);
-        }
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ prompt }));
+        clearInterval(waitForOpen);
+      }
     }, 100);
 
   }, [connect]);
 
   const startCycle = useCallback(async (durationMinutes: number) => {
-      setIsRunning(true);
-      connect();
-      const baseUrl = getBaseUrl();
-      try {
-          await fetch(`http://${baseUrl}/agent/start?duration_minutes=${durationMinutes}`, { method: 'POST' });
-      } catch (e) {
-          console.error("Failed to start agent", e);
-          setIsRunning(false);
-      }
+    setIsRunning(true);
+    connect();
+    const baseUrl = getBaseUrl();
+    try {
+      await fetch(`http://${baseUrl}/agent/start?duration_minutes=${durationMinutes}`, { method: 'POST' });
+    } catch (e) {
+      console.error("Failed to start agent", e);
+      setIsRunning(false);
+    }
   }, [connect]);
 
   const stopCycle = useCallback(async () => {
-      const baseUrl = getBaseUrl();
-      try {
-          await fetch(`http://${baseUrl}/agent/stop`, { method: 'POST' });
-          setIsRunning(false);
-      } catch (e) {
-          console.error("Failed to stop agent", e);
-      }
+    const baseUrl = getBaseUrl();
+    try {
+      await fetch(`http://${baseUrl}/agent/stop`, { method: 'POST' });
+      setIsRunning(false);
+    } catch (e) {
+      console.error("Failed to stop agent", e);
+    }
   }, []);
 
   const disconnect = useCallback(() => {
@@ -154,6 +154,25 @@ export function useAgent() {
       wsRef.current.close();
     }
   }, []);
+
+  const runOnce = useCallback(async () => {
+    // Set isRunning to true to trigger the "Processing" UI state
+    setIsRunning(true);
+    connect();
+    const baseUrl = getBaseUrl();
+    try {
+      const res = await fetch(`http://${baseUrl}/agent/run-once`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'error') {
+        console.error(data.message);
+        // Maybe show a toast/alert? For now just log
+        setIsRunning(false);
+      }
+    } catch (e) {
+      console.error("Failed to trigger run-once", e);
+      setIsRunning(false);
+    }
+  }, [connect]);
 
   return {
     events,
@@ -164,6 +183,7 @@ export function useAgent() {
     connectAndRun,
     startCycle,
     stopCycle,
+    runOnce,
     disconnect
   };
 }

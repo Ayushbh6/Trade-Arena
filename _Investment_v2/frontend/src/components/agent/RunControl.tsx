@@ -7,9 +7,10 @@ interface RunControlProps {
     isRunning: boolean;
     onStart: (duration: number) => void;
     onStop: () => void;
+    onRunOnce: () => void;
 }
 
-export function RunControl({ isRunning, onStart, onStop }: RunControlProps) {
+export function RunControl({ isRunning, onStart, onStop, onRunOnce }: RunControlProps) {
     const [durationStr, setDurationStr] = useState("10");
     const [error, setError] = useState<string | null>(null);
 
@@ -26,7 +27,7 @@ export function RunControl({ isRunning, onStart, onStop }: RunControlProps) {
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value;
         setDurationStr(val);
-        
+
         if (val === "") {
             setError(null);
             return;
@@ -45,19 +46,19 @@ export function RunControl({ isRunning, onStart, onStop }: RunControlProps) {
             <div className="flex items-center gap-2 bg-white/5 rounded-lg p-1 border border-white/10">
                 <div className="flex items-center gap-2 px-2 border-r border-white/10">
                     <Timer className="h-3 w-3 text-white/40" />
-                    <Input 
-                        type="text" 
+                    <Input
+                        type="text"
                         value={durationStr}
                         onChange={handleChange}
                         className="h-6 w-12 bg-transparent border-0 p-0 text-xs text-center text-white focus-visible:ring-0"
                     />
                     <span className="text-[10px] text-white/40">min</span>
                 </div>
-                
+
                 {isRunning ? (
-                    <Button 
-                        size="sm" 
-                        variant="destructive" 
+                    <Button
+                        size="sm"
+                        variant="destructive"
                         onClick={onStop}
                         className="h-6 px-3 text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/20"
                     >
@@ -65,14 +66,25 @@ export function RunControl({ isRunning, onStart, onStop }: RunControlProps) {
                         Stop
                     </Button>
                 ) : (
-                    <Button 
-                        size="sm" 
-                        onClick={handleStart}
-                        className="h-6 px-3 text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/20"
-                    >
-                        <Play className="h-3 w-3 mr-1.5 fill-current" />
-                        Start Run
-                    </Button>
+                    <div className="flex items-center gap-1">
+                        <Button
+                            size="sm"
+                            onClick={onRunOnce}
+                            className="h-6 px-3 text-xs bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 border border-indigo-500/20"
+                        >
+                            <Play className="h-3 w-3 mr-1.5 fill-current" />
+                            Run Once
+                        </Button>
+                        <div className="w-px h-4 bg-white/10 mx-1" />
+                        <Button
+                            size="sm"
+                            onClick={handleStart}
+                            className="h-6 px-3 text-xs bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 border border-emerald-500/20"
+                        >
+                            <Play className="h-3 w-3 mr-1.5 fill-current" />
+                            Start Loop
+                        </Button>
+                    </div>
                 )}
             </div>
             {error && (

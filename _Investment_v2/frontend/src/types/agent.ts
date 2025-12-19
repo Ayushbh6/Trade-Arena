@@ -1,15 +1,15 @@
-export type AgentEventType = 
-  | "thought" 
-  | "code" 
-  | "observation" 
-  | "tool_call" 
-  | "tool_result" 
-  | "decision" 
-  | "error" 
+export type AgentEventType =
+  | "thought"
+  | "code"
+  | "observation"
+  | "tool_call"
+  | "tool_result"
+  | "decision"
+  | "error"
   | "info"
   | "system";
 
-export type AgentSource = "manager" | "quant" | "system";
+export type AgentSource = "manager" | "quant" | "system" | "user";
 
 export interface TokenUsage {
   prompt_tokens: number;

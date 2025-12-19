@@ -69,6 +69,91 @@ app.add_middleware(
 # --- GLOBAL STATE ---
 is_agent_active = False
 
+async def run_single_cycle(session_id: str):
+    """
+    Executes a single cycle of the agent for a given session.
+    Returns the cycle object or raises an exception.
+    """
+    print(f"--- Starting Single Cycle for Session {session_id} ---")
+            
+    # 2. Get Previous Context
+    previous_memory = await Database.get_latest_memory(session_id)
+    
+    # 3. Create Cycle Record
+    cycle_count = await Database.db.cycles.count_documents({"session_id": session_id})
+    cycle_number = cycle_count + 1
+    
+    cycle = await Database.create_cycle(session_id, cycle_number)
+    
+    # 4. Run Agent
+    events = []
+    generated_memory = None
+    
+    # Determine prompt based on context
+    prompt = "Analyze the market using your Quant Researcher's Python/Pandas capabilities. Formulate and test high-level strategies (e.g., trend following, mean reversion, or correlations) and execute trades if opportunities exist."
+    if previous_memory:
+        prompt += f" Follow up on: {previous_memory.next_steps}"
+    
+    # Run Sync Generator
+    iterator = run_manager_agent(prompt, previous_memory=previous_memory, verbose=True)
+    
+    for event in iterator:
+        event_dict = event.model_dump()
+        events.append(event_dict)
+        
+        # Broadcast live
+        await ws_manager.broadcast(event_dict)
+        
+        # Persist event immediately for granular logging
+        await Database.add_event_to_cycle(cycle.id, event_dict)
+        
+        if event.type == "memory":
+            try:
+                generated_memory = AgentMemory.model_validate_json(event.content)
+            except:
+                pass
+        # Small sleep to yield control
+        await asyncio.sleep(0.01)
+    
+    # 5. Capture Portfolio Snapshot
+    portfolio_snapshot = {}
+    try:
+        port_json = get_portfolio_state()
+        port_data = json.loads(port_json)
+        # Parse "Positions": ["ETH: 0.1", ...] into {"ETH": 0.1}
+        positions_map = {}
+        for p in port_data.get("Positions", []):
+            parts = p.split(":")
+            if len(parts) == 2:
+                positions_map[parts[0].strip()] = float(parts[1].strip())
+                
+        portfolio_snapshot = {
+            "total_usdt": float(port_data.get("USDT_Free", 0)),
+            "positions": positions_map
+        }
+    except Exception as e:
+        print(f"Error capturing portfolio snapshot: {e}")
+
+    # 6. Save Cycle Data
+    await Database.update_cycle(
+        cycle_id=cycle.id,
+        events=events,
+        memory=generated_memory,
+        portfolio=portfolio_snapshot
+    )
+    
+    print(f"--- Cycle {cycle_number} Complete. ---")
+    
+    # Notify frontend that the cycle is done so it can reset the "Processing" state
+    await ws_manager.broadcast({
+        "type": "system", 
+        "source": "system", 
+        "content": "Single cycle complete.",
+        "metadata": {"status": "done"}
+    })
+    
+    return cycle
+
 async def autonomous_loop():
     global is_agent_active
     print("Autonomous Loop Initialized. Agent is currently IDLE.")
@@ -86,75 +171,9 @@ async def autonomous_loop():
                 is_agent_active = False
                 continue
             
-            print(f"--- Starting Cycle for Session {session.id} ---")
+            await run_single_cycle(session.id)
             
-            # 2. Get Previous Context
-            previous_memory = await Database.get_latest_memory(session.id)
-            
-            # 3. Create Cycle Record
-            cycle_count = await Database.db.cycles.count_documents({"session_id": session.id})
-            cycle_number = cycle_count + 1
-            
-            cycle = await Database.create_cycle(session.id, cycle_number)
-            
-            # 4. Run Agent
-            events = []
-            generated_memory = None
-            
-            # Determine prompt based on context
-            prompt = "Analyze the market using your Quant Researcher's Python/Pandas capabilities. Formulate and test high-level strategies (e.g., trend following, mean reversion, or correlations) and execute trades if opportunities exist."
-            if previous_memory:
-                prompt += f" Follow up on: {previous_memory.next_steps}"
-            
-            # Run Sync Generator
-            iterator = run_manager_agent(prompt, previous_memory=previous_memory, verbose=True)
-            
-            for event in iterator:
-                event_dict = event.model_dump()
-                events.append(event_dict)
-                
-                # Broadcast live
-                await ws_manager.broadcast(event_dict)
-                
-                # Persist event immediately for granular logging
-                await Database.add_event_to_cycle(cycle.id, event_dict)
-                
-                if event.type == "memory":
-                    try:
-                        generated_memory = AgentMemory.model_validate_json(event.content)
-                    except:
-                        pass
-                # Small sleep to yield control
-                await asyncio.sleep(0.01)
-            
-            # 5. Capture Portfolio Snapshot
-            portfolio_snapshot = {}
-            try:
-                port_json = get_portfolio_state()
-                port_data = json.loads(port_json)
-                # Parse "Positions": ["ETH: 0.1", ...] into {"ETH": 0.1}
-                positions_map = {}
-                for p in port_data.get("Positions", []):
-                    parts = p.split(":")
-                    if len(parts) == 2:
-                        positions_map[parts[0].strip()] = float(parts[1].strip())
-                        
-                portfolio_snapshot = {
-                    "total_usdt": float(port_data.get("USDT_Free", 0)),
-                    "positions": positions_map
-                }
-            except Exception as e:
-                print(f"Error capturing portfolio snapshot: {e}")
-
-            # 6. Save Cycle Data
-            await Database.update_cycle(
-                cycle_id=cycle.id,
-                events=events,
-                memory=generated_memory,
-                portfolio=portfolio_snapshot
-            )
-            
-            print(f"--- Cycle {cycle_number} Complete. Sleeping for {CYCLE_CADENCE} mins ---")
+            print(f"Sleeping for {CYCLE_CADENCE} mins ---")
             
             # 7. Sleep
             await asyncio.sleep(CYCLE_CADENCE * 60)
@@ -221,6 +240,33 @@ async def stop_agent():
     global is_agent_active
     is_agent_active = False
     return {"status": "agent_stopped"}
+
+@app.post("/agent/run-once")
+async def run_agent_once():
+    """
+    Manually triggers a single agent cycle without enabling the autonomous loop.
+    """
+    global is_agent_active
+    
+    # Ensure active session
+    session = await Database.get_active_session()
+    if not session:
+        session = await Database.create_session(config={"mode": "manual_run"})
+    
+    # If the autonomous loop is running, we might want to prevent this or let them run in parallel (but parallel might cause race conditions on memory).
+    # Ideally, we check:
+    if is_agent_active:
+         return {"status": "error", "message": "Agent is currently running in autonomous mode. Stop it first."}
+
+    # Run in background to return quickly, or await? 
+    # Since the user wants to see the run, we should probably just fire it off in a task
+    # BUT, run_single_cycle is async and connected to WS, so if we await it here, the HTTP request hangs until cycle done (could be long)
+    # Better to use BackgroundTasks or just asyncio.create_task
+    
+    task = asyncio.create_task(run_single_cycle(session.id))
+    
+    return {"status": "starting_single_run", "session_id": session.id}
+
 
 @app.get("/history")
 async def get_history():
