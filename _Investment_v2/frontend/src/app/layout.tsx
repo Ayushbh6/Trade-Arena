@@ -17,17 +17,21 @@ export const metadata: Metadata = {
   description: "Autonomous Quant Fund Manager",
 };
 
+import { AgentProvider } from "@/context/AgentContext";
+
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <AgentProvider>
+          {children}
+        </AgentProvider>
       </body>
     </html>
   );

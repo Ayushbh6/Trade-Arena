@@ -1,115 +1,56 @@
 "use client";
 
-import { useState } from "react";
-import { useAgent } from "@/hooks/useAgent";
-import { AgentFeed } from "@/components/agent/AgentFeed";
-import { ArtifactViewer } from "@/components/agent/ArtifactViewer";
-import { TokenCounter } from "@/components/agent/TokenCounter";
-import { RunControl } from "@/components/agent/RunControl";
-import { Sidebar } from "@/components/layout/Sidebar";
-import { Dashboard } from "@/components/dashboard/Dashboard";
-import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
-import { Loader2, Sparkles, Command } from "lucide-react";
+import Link from "next/link";
+import { ArrowRight, Bot, LineChart, ShieldCheck } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export default function Home() {
-  const { events, isConnected, isServerReady, isRunning, connectAndRun, disconnect, tokenCounts, startCycle, stopCycle, runOnce, activeSession } = useAgent();
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [currentView, setCurrentView] = useState<'dashboard' | 'focus'>('dashboard');
-
-  // Determine status label and color
-  const getStatus = () => {
-    if (isConnected) return { label: 'Live Session', color: 'green', animate: true };
-    if (isServerReady) return { label: 'System Ready', color: 'emerald', animate: false };
-    return { label: 'Offline', color: 'red', animate: false };
-  };
-
-  const status = getStatus();
-
   return (
-    <main className="h-screen w-screen bg-black text-white overflow-hidden flex flex-col font-sans selection:bg-indigo-500/30 relative">
-      {/* Sidebar & Overlay */}
-      <Sidebar
-        isOpen={isSidebarOpen}
-        onClose={() => setIsSidebarOpen(false)}
-        currentView={currentView}
-        onNavigate={(view) => {
-          setCurrentView(view);
-          setIsSidebarOpen(false);
-        }}
-      />
+    <main className="h-screen w-screen bg-black text-white flex flex-col items-center justify-center relative overflow-hidden">
 
-      {/* Backdrop Blur Overlay */}
-      <div
-        className={`absolute inset-0 bg-black/40 backdrop-blur-[2px] z-50 transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
-        onClick={() => setIsSidebarOpen(false)}
-      />
+      {/* Background Elements */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-indigo-900/20 via-black to-black z-0 pointer-events-none" />
+      <div className="absolute top-0 left-0 w-full h-full bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 z-0 pointer-events-none"></div>
 
-      {/* Header - Sleek Glass */}
-      <header className="h-14 flex-none border-b border-white/10 flex items-center justify-between px-6 bg-black/50 backdrop-blur-xl sticky top-0 z-40 relative">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setIsSidebarOpen(true)}
-            className="h-8 w-8 bg-white/10 rounded-xl flex items-center justify-center border border-white/5 shadow-inner hover:bg-white/20 transition-colors"
-          >
-            <Command className="h-4 w-4 text-white" />
-          </button>
-          <div>
-            <h1 className="font-medium text-sm tracking-wide text-white/90">Investment Agent <span className="text-white/40 font-normal">v2.0</span></h1>
+      <div className="z-10 text-center max-w-2xl px-6">
+        <div className="mb-6 flex justify-center">
+          <div className="h-16 w-16 bg-white/10 rounded-2xl flex items-center justify-center border border-white/10 backdrop-blur-md shadow-2xl shadow-indigo-500/10">
+            <Bot className="h-8 w-8 text-white" />
           </div>
         </div>
 
-        {/* Middle - Run Control */}
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-          <RunControl isRunning={isRunning} onStart={startCycle} onStop={stopCycle} onRunOnce={runOnce} />
-        </div>
+        <h1 className="text-4xl md:text-6xl font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-white via-white/80 to-white/40 mb-6">
+          Investment Agent <span className="font-light text-indigo-400">v2.0</span>
+        </h1>
 
-        <div className="flex items-center gap-3">
-          <TokenCounter managerTokens={tokenCounts.manager} quantTokens={tokenCounts.quant} />
+        <p className="text-lg text-white/50 mb-10 leading-relaxed">
+          An autonomous, AI-driven quantitative trading system designed to analyze markets, execute strategies, and manage risk in real-time.
+        </p>
 
-          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border bg-${status.color}-500/10 border-${status.color}-500/20 text-${status.color}-400`}>
-            <div className={`h-1.5 w-1.5 rounded-full bg-${status.color}-500 ${status.animate ? 'animate-pulse' : ''}`} />
-            <span className="text-[10px] font-medium tracking-wide uppercase">{status.label}</span>
+        <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+          <Link href="/dashboard">
+            <Button size="lg" className="h-12 px-8 bg-white text-black hover:bg-white/90 rounded-full font-medium text-base transition-all hover:scale-105">
+              Launch Dashboard
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          </Link>
+          <div className="flex gap-6 mt-6 sm:mt-0 sm:ml-6 text-sm text-white/40">
+            <div className="flex items-center gap-2">
+              <LineChart className="h-4 w-4" />
+              <span>Real-time Analysis</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4" />
+              <span>Risk Managed</span>
+            </div>
           </div>
-          {isRunning && <span className="text-xs text-indigo-400 font-medium flex items-center gap-1 animate-pulse"><Loader2 className="h-3 w-3 animate-spin" /> Processing</span>}
         </div>
-      </header>
-
-      {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden z-0">
-        {currentView === 'dashboard' ? (
-          <Dashboard events={events} activeSession={activeSession} />
-        ) : (
-          <ResizablePanelGroup orientation="horizontal" className="h-full w-full">
-
-            {/* Left Panel: Chat/Feed */}
-            <ResizablePanel defaultSize={50} minSize={30} className="bg-black border-r border-white/10 relative">
-              <div className="h-full flex flex-col">
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
-                  {events.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-white/30 p-8 text-center">
-                      <div className="h-20 w-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 border border-white/5">
-                        <Sparkles className="h-10 w-10 text-white/20" />
-                      </div>
-                      <h3 className="font-medium text-lg text-white/80 mb-2">Agent Idle</h3>
-                      <p className="text-sm max-w-xs leading-relaxed text-white/50">Awaiting your command to analyze markets and execute strategies.</p>
-                    </div>
-                  ) : (
-                    <AgentFeed events={events} />
-                  )}
-                </div>
-              </div>
-            </ResizablePanel>
-
-            <ResizableHandle withHandle className="bg-white/5 hover:bg-white/10 transition-colors w-1.5" />
-
-            {/* Right Panel: Artifacts/Work */}
-            <ResizablePanel defaultSize={50} minSize={30} className="bg-neutral-950/50">
-              <ArtifactViewer events={events} />
-            </ResizablePanel>
-
-          </ResizablePanelGroup>
-        )}
       </div>
+
+      <div className="absolute bottom-8 left-0 w-full text-center text-white/20 text-xs">
+        Powered by Multi-Agent System Architecture
+      </div>
+
     </main>
   );
 }

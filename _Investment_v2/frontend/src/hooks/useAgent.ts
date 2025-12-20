@@ -1,7 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { AgentEvent, TradingSession } from '@/types/agent';
+import { toast } from 'sonner';
+
+const STORAGE_KEYS = {
+  EVENTS: 'investment_agent_events',
+  SESSION: 'investment_agent_session',
+  TOKENS: 'investment_agent_tokens'
+};
 
 export function useAgent() {
+  // Initialize state from LocalStorage if available (client-side only check inside effect or lazy init)
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [isConnected, setIsConnected] = useState(false); // WebSocket connection
   const [isServerReady, setIsServerReady] = useState(false); // HTTP Health check
@@ -11,6 +19,50 @@ export function useAgent() {
     quant: { prompt: 0, completion: 0, total: 0 }
   });
   const [activeSession, setActiveSession] = useState<TradingSession | null>(null);
+
+  // Load from storage on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedEvents = localStorage.getItem(STORAGE_KEYS.EVENTS);
+      const savedSession = localStorage.getItem(STORAGE_KEYS.SESSION);
+      const savedTokens = localStorage.getItem(STORAGE_KEYS.TOKENS);
+
+      if (savedEvents) setEvents(JSON.parse(savedEvents));
+      if (savedSession) setActiveSession(JSON.parse(savedSession));
+      if (savedTokens) setTokenCounts(JSON.parse(savedTokens));
+    }
+  }, []);
+
+  // Sync state to storage
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(events));
+    }
+  }, [events]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && activeSession) {
+      localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(activeSession));
+    }
+  }, [activeSession]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEYS.TOKENS, JSON.stringify(tokenCounts));
+    }
+  }, [tokenCounts]);
+
+  // Clear storage helper
+  const clearStorage = useCallback(() => {
+    setEvents([]);
+    setTokenCounts({ manager: { prompt: 0, completion: 0, total: 0 }, quant: { prompt: 0, completion: 0, total: 0 } });
+    setActiveSession(null);
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(STORAGE_KEYS.EVENTS);
+      localStorage.removeItem(STORAGE_KEYS.SESSION);
+      localStorage.removeItem(STORAGE_KEYS.TOKENS);
+    }
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -30,15 +82,15 @@ export function useAgent() {
         const res = await fetch(`http://${baseUrl}/health`);
         if (res.ok) {
           setIsServerReady(true);
-          // Also fetch active session
-          const sessionRes = await fetch(`http://${baseUrl}/session/active`);
-          const sessionData = await sessionRes.json();
-          if (sessionData && sessionData.id) {
-            setActiveSession(sessionData);
-          } else {
-            setActiveSession(null);
-          }
         }
+
+        // Also check status
+        const statusRes = await fetch(`http://${baseUrl}/agent/status`);
+        if (statusRes.ok) {
+          const status = await statusRes.json();
+          setIsRunning(status.is_running);
+        }
+
       } catch (e) {
         console.error("Server offline", e);
         setIsServerReady(false);
@@ -64,7 +116,18 @@ export function useAgent() {
 
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as AgentEvent;
+        const rawData = JSON.parse(event.data); // Use rawData first
+
+        // Handle Status Updates first, independent of AgentEvent type strictness if needed
+        if (rawData.type === 'status_update') {
+          const content = rawData.content;
+          if (content && typeof content.is_running === 'boolean') {
+            setIsRunning(content.is_running);
+          }
+          return; // Don't add to event log
+        }
+
+        const data = rawData as AgentEvent;
         // Add local timestamp
         const eventWithTime = { ...data, timestamp: new Date().toISOString() };
 
@@ -89,12 +152,13 @@ export function useAgent() {
         }
 
         if (data.type === 'system' && data.metadata?.status === 'done') {
-          setIsRunning(false);
+          // setIsRunning(false); // Rely on status_update mostly now, but keep for safety/redundancy or remove. 
+          // Actually, let's keep it but rely on the explicit status_update for the toggle.
         }
 
         // Handle stop event
         if (data.type === 'system' && data.content.includes("stopped")) {
-          setIsRunning(false);
+          // setIsRunning(false); 
         }
       } catch (e) {
         console.error('Error parsing event:', e);
@@ -104,7 +168,7 @@ export function useAgent() {
     ws.onclose = () => {
       console.log('Disconnected from Agent Stream');
       setIsConnected(false);
-      setIsRunning(false);
+      setIsRunning(false); // Default to false if disconnected
     };
 
     ws.onerror = (error) => {
@@ -115,6 +179,9 @@ export function useAgent() {
   }, []);
 
   const connectAndRun = useCallback((prompt: string) => {
+    // START NEW RUN: Clear old state
+    clearStorage();
+
     // Reset state but keep the user prompt visible immediately
     const userEvent: AgentEvent = {
       type: "info",
@@ -136,9 +203,12 @@ export function useAgent() {
       }
     }, 100);
 
-  }, [connect]);
+  }, [connect, clearStorage]);
 
   const startCycle = useCallback(async (durationMinutes: number) => {
+    // START NEW RUN: Clear old state
+    clearStorage();
+
     setIsRunning(true);
     connect();
     const baseUrl = getBaseUrl();
@@ -148,7 +218,7 @@ export function useAgent() {
       console.error("Failed to start agent", e);
       setIsRunning(false);
     }
-  }, [connect]);
+  }, [connect, clearStorage]);
 
   const stopCycle = useCallback(async () => {
     const baseUrl = getBaseUrl();
@@ -167,23 +237,32 @@ export function useAgent() {
   }, []);
 
   const runOnce = useCallback(async () => {
-    // Set isRunning to true to trigger the "Processing" UI state
+    // Optimistic: Set running to true to show immediate feedback (button changes state)
     setIsRunning(true);
     connect();
     const baseUrl = getBaseUrl();
     try {
       const res = await fetch(`http://${baseUrl}/agent/run-once`, { method: 'POST' });
       const data = await res.json();
+
       if (data.status === 'error') {
+        // Backend rejected request (e.g. Agent Busy)
         console.error(data.message);
-        // Maybe show a toast/alert? For now just log
-        setIsRunning(false);
+        toast.error(data.message); // Show Red Toast
+
+        // Ensure UI stays in sync with potential server activity or revert if truly failed
+        setIsRunning(true);
+      } else {
+        // Success: NOW it is safe to clear storage for the new run
+        clearStorage();
+        toast.success("Agent run started");
       }
     } catch (e) {
       console.error("Failed to trigger run-once", e);
+      toast.error("Failed to reach server");
       setIsRunning(false);
     }
-  }, [connect]);
+  }, [connect, clearStorage]);
 
   return {
     events,

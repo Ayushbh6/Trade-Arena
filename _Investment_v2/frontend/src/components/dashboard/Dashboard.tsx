@@ -56,12 +56,20 @@ export function Dashboard({ events, activeSession }: DashboardProps) {
 
     // Filter critical events for the Activity Stream
     const criticalEvents = useMemo(() => {
-        return events.filter(e =>
-            e.type === 'decision' ||
-            (e.type === 'system' && e.metadata?.status === 'done') ||
-            (e.type === 'tool_call' && e.metadata?.tool === 'execute_order') ||
-            (e.source === 'manager' && e.type === 'info' && e.content.includes("Starting"))
-        ).slice(-6).reverse(); // Last 6 events, newest first
+        return events.filter(e => {
+            // Include Decisions
+            if (e.type === 'decision') return true;
+            // Include System Done
+            if (e.type === 'system' && e.metadata?.status === 'done') return true;
+            // Include Key Manager Tool Calls
+            if (e.source === 'manager' && e.type === 'tool_call') return true;
+            // Include Key Quant Actions
+            if (e.source === 'quant' && (e.type === 'tool_call' || e.type === 'tool_result')) return true;
+            // Include Manager Info (Starting, etc)
+            if (e.source === 'manager' && e.type === 'info' && e.content.includes("Starting")) return true;
+
+            return false;
+        }).slice(-20).reverse(); // Keeping more history since they are smaller now
     }, [events]);
 
     return (
@@ -132,28 +140,30 @@ export function Dashboard({ events, activeSession }: DashboardProps) {
                     </div>
                 </div>
 
-                {/* Activity Feed */}
-                <div className="bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col">
-                    <div className="flex items-center gap-2 mb-4">
+                {/* Activity Feed - FIXED HEIGHT */}
+                <div className="h-full bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col overflow-hidden">
+                    <div className="flex items-center gap-2 mb-4 flex-none">
                         <Bell className="h-4 w-4 text-indigo-400" />
                         <h3 className="text-sm font-medium text-white">Live Activity</h3>
                     </div>
-                    <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar pr-2">
+                    <div className="flex-1 overflow-y-auto space-y-2 custom-scrollbar pr-2">
                         {criticalEvents.length === 0 ? (
                             <div className="text-center text-white/30 text-xs py-10">No recent trading activity</div>
                         ) : (
                             criticalEvents.map((e, i) => (
-                                <div key={i} className="flex gap-3 items-start p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                                    <div className={`mt-0.5 h-2 w-2 rounded-full ${getActionColor(e)}`} />
-                                    <div>
-                                        <div className="text-xs text-white/80 leading-relaxed font-medium">
-                                            {e.type === 'decision' ? "Trading Decision" : "System Update"}
+                                <div key={i} className="flex gap-3 items-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                                    <div className={`flex-none h-1.5 w-1.5 rounded-full ${getActionColor(e)}`} />
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-baseline justify-between gap-2">
+                                            <div className="text-xs text-white/90 font-medium truncate">
+                                                {formatEventTitle(e)}
+                                            </div>
+                                            <div className="text-[10px] text-white/30 whitespace-nowrap flex-none">
+                                                {e.timestamp ? new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}
+                                            </div>
                                         </div>
-                                        <div className="text-[11px] text-white/50 leading-relaxed max-h-16 overflow-hidden text-ellipsis">
-                                            {e.content}
-                                        </div>
-                                        <div className="text-[10px] text-white/30 mt-1">
-                                            {e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : 'Just now'}
+                                        <div className="text-[11px] text-white/50 truncate">
+                                            {formatEventContent(e)}
                                         </div>
                                     </div>
                                 </div>
@@ -226,9 +236,52 @@ function SmallChart({ symbol, name, price, change, data, color, isMounted }: any
     )
 }
 
+// --- formatters ---
+
+function formatEventTitle(e: AgentEvent) {
+    if (e.source === 'quant') return 'Quant Analyst';
+    if (e.type === 'decision') return 'Manager Decision';
+    if (e.type === 'tool_call') return `Using Tool: ${e.metadata?.tool || 'System'}`;
+    return 'System Update';
+}
+
+function formatEventContent(e: AgentEvent) {
+    const text = e.content;
+
+    // 1. Manager Decisions: Extract the recommendation
+    if (e.type === 'decision') {
+        // Look for "Decision:" or "Action:" or specific patterns
+        const match = text.match(/\*\*(Recommend|Decision|Strategy).*?\*\*[:\s]*(.*?)(?=\.|\n|$)/i);
+        if (match && match[2]) return match[2].trim();
+
+        // Fallback: If it's a short text, show it, otherwise truncate
+        return text.length > 50 ? text.substring(0, 50) + "..." : text;
+    }
+
+    // 2. Tool Calls
+    if (e.type === 'tool_call') {
+        return `Calling ${e.metadata?.tool} with params...`;
+    }
+
+    // 3. Tool Results
+    if (e.type === 'tool_result') {
+        if (e.metadata?.tool === 'execute_python') return 'Code execution complete.';
+        return 'Result received.';
+    }
+
+    // 4. Quant Messages
+    if (e.source === 'quant') {
+        if (text.includes("thought")) return "Analyzing market data...";
+        if (text.includes("python")) return "Generating analysis code...";
+    }
+
+    return text.length > 60 ? text.substring(0, 60) + "..." : text;
+}
+
 function getActionColor(e: AgentEvent) {
     if (e.type === 'decision') return 'bg-indigo-500';
     if (e.type === 'error') return 'bg-red-500';
+    if (e.source === 'quant') return 'bg-cyan-500';
     if (e.content.includes("complete")) return 'bg-emerald-500';
     return 'bg-white/40';
 }

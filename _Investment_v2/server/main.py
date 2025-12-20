@@ -68,6 +68,7 @@ app.add_middleware(
 
 # --- GLOBAL STATE ---
 is_agent_active = False
+is_manual_run_active = False
 
 async def run_single_cycle(session_id: str):
     """
@@ -210,6 +211,15 @@ async def stop_session():
         return {"status": "stopped", "session_id": active.id}
     return {"status": "no_active_session"}
 
+@app.get("/agent/status")
+async def get_agent_status():
+    return {
+        "is_running": is_agent_active or is_manual_run_active,
+        "is_autonomous": is_agent_active,
+        "is_manual": is_manual_run_active,
+        "mode": "autonomous" if is_agent_active else "manual" if is_manual_run_active else "idle"
+    }
+
 @app.post("/agent/start")
 async def start_agent(duration_minutes: int = 10):
     global is_agent_active
@@ -220,6 +230,15 @@ async def start_agent(duration_minutes: int = 10):
         await Database.create_session(config={"mode": "autonomous"})
         
     is_agent_active = True
+    
+    # Broadcast start
+    await ws_manager.broadcast({
+        "type": "status_update",
+        "content": {
+            "is_running": True,
+            "mode": "autonomous"
+        }
+    })
     
     # Start timer
     asyncio.create_task(stop_after_duration(duration_minutes))
@@ -234,11 +253,27 @@ async def stop_after_duration(minutes: int):
         is_agent_active = False
         # Broadcast stop event
         await ws_manager.broadcast({"type": "system", "source": "system", "content": "Timer expired. Agent stopped."})
+        await ws_manager.broadcast({
+            "type": "status_update",
+            "content": {
+                "is_running": False,
+                "mode": "idle"
+            }
+        })
 
 @app.post("/agent/stop")
 async def stop_agent():
     global is_agent_active
     is_agent_active = False
+    
+    await ws_manager.broadcast({
+        "type": "status_update",
+        "content": {
+            "is_running": False,
+            "mode": "idle"
+        }
+    })
+    
     return {"status": "agent_stopped"}
 
 @app.post("/agent/run-once")
@@ -247,23 +282,57 @@ async def run_agent_once():
     Manually triggers a single agent cycle without enabling the autonomous loop.
     """
     global is_agent_active
+    global is_manual_run_active
     
     # Ensure active session
     session = await Database.get_active_session()
     if not session:
         session = await Database.create_session(config={"mode": "manual_run"})
     
-    # If the autonomous loop is running, we might want to prevent this or let them run in parallel (but parallel might cause race conditions on memory).
-    # Ideally, we check:
+    # Check locks
     if is_agent_active:
          return {"status": "error", "message": "Agent is currently running in autonomous mode. Stop it first."}
-
-    # Run in background to return quickly, or await? 
-    # Since the user wants to see the run, we should probably just fire it off in a task
-    # BUT, run_single_cycle is async and connected to WS, so if we await it here, the HTTP request hangs until cycle done (could be long)
-    # Better to use BackgroundTasks or just asyncio.create_task
     
-    task = asyncio.create_task(run_single_cycle(session.id))
+    if is_manual_run_active:
+         return {"status": "error", "message": "Agent is already executing a manual run. Please wait."}
+
+    # Set Lock
+    is_manual_run_active = True
+    
+    # Broadcast start
+    await ws_manager.broadcast({
+        "type": "status_update",
+        "content": {
+            "is_running": True,
+            "mode": "manual"
+        }
+    })
+    
+    # Define callback to release lock
+    def on_run_complete(d):
+        global is_manual_run_active
+        is_manual_run_active = False
+        print("Manual run finished. Lock released.")
+        # We need to broadcast here, but we can't await in a sync callback easily or thread-safe way without loop reference
+        # Ideally run_single_cycle should return and we handle it after await
+        
+    # Better approach: wrapper async function
+    async def run_wrapper():
+        global is_manual_run_active
+        try:
+            await run_single_cycle(session.id)
+        finally:
+            is_manual_run_active = False
+            print("Manual run finished. Lock released.")
+            await ws_manager.broadcast({
+                "type": "status_update",
+                "content": {
+                    "is_running": False,
+                    "mode": "idle"
+                }
+            })
+
+    asyncio.create_task(run_wrapper())
     
     return {"status": "starting_single_run", "session_id": session.id}
 

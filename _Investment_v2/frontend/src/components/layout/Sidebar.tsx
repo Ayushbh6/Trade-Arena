@@ -1,22 +1,19 @@
 import React, { useState } from 'react';
-import { LayoutDashboard, Focus, X, ChevronDown, User, Bot } from 'lucide-react';
+import { LayoutDashboard, Focus, X, ChevronDown, User, Bot, Home } from 'lucide-react';
 import { Button } from "@/components/ui/button";
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 
 interface SidebarProps {
     isOpen: boolean;
     onClose: () => void;
-    currentView: 'dashboard' | 'focus';
-    onNavigate: (view: 'dashboard' | 'focus') => void;
 }
 
-export function Sidebar({ isOpen, onClose, currentView, onNavigate }: SidebarProps) {
+export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const [isFocusOpen, setIsFocusOpen] = useState(true);
+    const pathname = usePathname();
 
-    const handleNav = (view: 'dashboard' | 'focus') => {
-        onNavigate(view);
-        if (view === 'focus') setIsFocusOpen(true);
-        // Optional: onClose(); if we want to close sidebar on selection
-    };
+    const isActive = (path: string) => pathname === path || pathname?.startsWith(path + '/');
 
     return (
         <div
@@ -30,7 +27,10 @@ export function Sidebar({ isOpen, onClose, currentView, onNavigate }: SidebarPro
         >
             {/* Header */}
             <div className="h-14 flex items-center justify-between px-6 border-b border-white/10 flex-none bg-black/20">
-                <span className="font-medium text-sm text-white/90 tracking-wide">Navigation</span>
+                <Link href="/" className="flex items-center gap-2" onClick={onClose}>
+                    <Home className="h-4 w-4 text-white/50" />
+                    <span className="font-medium text-sm text-white/90 tracking-wide">Investment Agent</span>
+                </Link>
                 <Button
                     variant="ghost"
                     size="icon"
@@ -43,21 +43,22 @@ export function Sidebar({ isOpen, onClose, currentView, onNavigate }: SidebarPro
 
             {/* Menu Items */}
             <div className="flex-1 p-4 space-y-1">
-                <Button
-                    variant="ghost"
-                    onClick={() => handleNav('dashboard')}
-                    className={`w-full justify-start h-12 mb-2 ${currentView === 'dashboard' ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
-                >
-                    <LayoutDashboard className="h-5 w-5 mr-3" />
-                    Investment Dashboard
-                </Button>
+                <Link href="/dashboard" onClick={onClose}>
+                    <Button
+                        variant="ghost"
+                        className={`w-full justify-start h-12 mb-2 ${isActive('/dashboard') ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                    >
+                        <LayoutDashboard className="h-5 w-5 mr-3" />
+                        Investment Dashboard
+                    </Button>
+                </Link>
 
                 {/* Focus Group */}
                 <div className="space-y-1 pt-2 border-t border-white/5">
                     <Button
                         variant="ghost"
                         onClick={() => setIsFocusOpen(!isFocusOpen)}
-                        className={`w-full justify-between h-12 ${currentView === 'focus' ? 'text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                        className={`w-full justify-between h-12 ${isActive('/active-agent') ? 'text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
                     >
                         <div className="flex items-center">
                             <Focus className="h-5 w-5 mr-3" />
@@ -69,15 +70,16 @@ export function Sidebar({ isOpen, onClose, currentView, onNavigate }: SidebarPro
                     {/* Submenu */}
                     {isFocusOpen && (
                         <div className="pl-4 space-y-1 animate-in slide-in-from-top-1 fade-in duration-200">
-                            <Button
-                                variant="ghost"
-                                onClick={() => handleNav('focus')}
-                                className={`w-full justify-start h-10 text-sm ${currentView === 'focus' ? 'bg-indigo-500/20 text-indigo-300' : 'text-white/40 hover:text-white/80 hover:bg-white/5'}`}
-                            >
-                                <Bot className="h-4 w-4 mr-3" />
-                                Quant Trader 1
-                                <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">LIVE</span>
-                            </Button>
+                            <Link href="/active-agent/quant-trader-1" onClick={onClose}>
+                                <Button
+                                    variant="ghost"
+                                    className={`w-full justify-start h-10 text-sm ${isActive('/active-agent/quant-trader-1') ? 'bg-indigo-500/20 text-indigo-300' : 'text-white/40 hover:text-white/80 hover:bg-white/5'}`}
+                                >
+                                    <Bot className="h-4 w-4 mr-3" />
+                                    Quant Trader 1
+                                    <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">LIVE</span>
+                                </Button>
+                            </Link>
                         </div>
                     )}
                 </div>
