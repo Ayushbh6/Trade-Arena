@@ -9,10 +9,27 @@ import { TokenCounter } from "@/components/agent/TokenCounter";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { AgentFeed } from "@/components/agent/AgentFeed";
 import { ArtifactViewer } from "@/components/agent/ArtifactViewer";
+import { useRouter } from "next/navigation";
 
 export default function ActiveAgentPage({ params }: { params: { agentId: string } }) {
     const { events, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady, activeSession } = useAgentContext();
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+    const router = useRouter();
+
+    // Wrappers to handle redirect
+    const handleStart = async (duration: number) => {
+        const sessionId = await startCycle(duration);
+        if (sessionId) {
+            router.push(`/active-agent/${params.agentId}/session/${sessionId}`);
+        }
+    };
+
+    const handleRunOnce = async () => {
+        const sessionId = await runOnce();
+        if (sessionId) {
+            router.push(`/active-agent/${params.agentId}/session/${sessionId}`);
+        }
+    };
 
     // Determine status label and color
     const getStatus = () => {
@@ -53,7 +70,7 @@ export default function ActiveAgentPage({ params }: { params: { agentId: string 
 
                 {/* Middle - Run Control */}
                 <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <RunControl isRunning={isRunning} onStart={startCycle} onStop={stopCycle} onRunOnce={runOnce} />
+                    <RunControl isRunning={isRunning} onStart={handleStart} onStop={stopCycle} onRunOnce={handleRunOnce} />
                 </div>
 
                 <div className="flex items-center gap-3">

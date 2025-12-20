@@ -81,7 +81,7 @@ Your goal is to answer the user's financial questions by performing rigorous, da
 ### **RESPONSE FORMAT (JSON ONLY):**
 You must respond with a valid JSON object matching this schema:
 {
-  "thought": "Your step-by-step plan for THIS specific turn. Numbered list.",
+  "thought": "Your step-by-step plan for THIS specific turn. Use a numbered list with double newlines between points for readability.",
   "action": "code" | "final_answer",
   "code": "The python code to run (if action is 'code')",
   "final_answer": "Your final conclusion (if action is 'final_answer')"

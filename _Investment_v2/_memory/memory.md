@@ -114,3 +114,32 @@ Small operational update after adding persistent storage and the autonomous cycl
 *   **Data Persistence (Fix):**
     *   **Last Decision:** Dashboard now fetches the `last_decision` from the session history via the backend API to ensure it persists across refreshes and when no run is active.
     *   **Robust Formatting:** Implemented strict regex extraction for decisions to prevent long text from breaking the UI layout (e.g., ensuring "HOLD", "BUY", "SELL" are shown concisely).
+
+## Update — Session Routing & Timestamp Integrity (2025-12-20)
+*   **Session-Based Routing:**
+    *   **Dynamic URLs:** Implemented a proper URL structure for sessions: `/active-agent/[agentId]/session/[sessionId]`.
+    *   **Automatic Redirection:** Starting a "Run Once" or "Start Loop" now automatically redirects the user to the specific session URL, ensuring a persistent and shareable state.
+    *   **Historical View:** Past runs now load via their unique URLs, and the UI automatically hides execution controls (Start/Stop) when viewing history to prevent state confusion.
+*   **Timestamp Fix (Historical Accuracy):**
+    *   **Backend Injection:** Updated the `AgentEvent` schema and server logic to inject UTC timestamps into every event at the moment of creation.
+    *   **Frontend Polyfill:** Refactored the frontend to prioritize these server-side timestamps. This fixed the bug where all past runs showed "Today's" date, ensuring historical data displays its actual execution time.
+*   **API Enhancements:**
+    *   Updated `GET /session/{session_id}` to return full session metadata, allowing the UI to display session-level details (like start time and initial balance) accurately.
+*   **Next.js 15 Compatibility:** Fixed `params` Promise unwrapping issues in dynamic routes to align with the latest Next.js standards.
+## Update — UI Overhaul for 2025 Premium Experience (2025-12-20)
+*   **Event-Type Specific Rendering:**
+    *   **Thoughts:** Now render in a **purple glass container** with proper markdown support, numbered lists properly spaced with newlines.
+    *   **Code Blocks:** Rendered as terminal-style blocks with **macOS traffic lights**, copy button, and syntax highlighting.
+    *   **Observations:** Smart parser splits **STDOUT** and **STDERR** into separate, color-coded sections.
+    *   **Tool Calls:** Humanized names (e.g., `get_portfolio_state` → "Get Portfolio State"), collapsible arguments.
+    *   **Tool Results:** JSON auto-detection with pretty-printing, collapsible for large payloads.
+    *   **Decisions:** Prominent **Strategic Decision** cards with action badges (BUY/SELL/HOLD) color-coded.
+    *   **Manager Prompts:** Important "Manager started" and "Consulting Quant" messages now highlighted in **indigo containers** with larger, readable text (text-sm) instead of tiny uppercase labels.
+*   **Workspace Artifacts Panel:**
+    *   **Code History:** Jupyter-style numbered cells (`IN [1]`, `IN [2]`) with copy buttons.
+    *   **Console Output:** Smart rendering with STDOUT/STDERR separation and JSON pretty-printing for tool results.
+*   **Technical Improvements:**
+    *   Fixed Tailwind dynamic class issues by using explicit color maps.
+    *   Preserved server timestamps instead of overwriting with local time.
+    *   Added custom scrollbar styling for a premium feel.
+    *   Standardized font sizes across all message types (text-sm baseline).

@@ -267,7 +267,7 @@ def run_manager_agent(initial_instruction: str, previous_memory: AgentMemory = N
     **CYCLE COMPLETE.**
     Now, summarize your current state into a valid JSON object matching this schema:
     {
-        "short_term_summary": "Concise narrative of what you did and saw.",
+        "short_term_summary": "Concise narrative of what you did and saw. Use double newlines for readability if you have multiple points.",
         "active_hypotheses": ["List of theories you are currently testing"],
         "pending_orders": ["List of any open orders"],
         "next_steps": "What you plan to do in the next cycle."

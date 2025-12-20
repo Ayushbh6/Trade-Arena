@@ -234,7 +234,7 @@ async def start_agent(duration_minutes: int = 10):
         await Database.stop_session(active.id)
 
     # Create NEW session for this loop
-    await Database.create_session(config={"mode": "autonomous"})
+    session = await Database.create_session(config={"mode": "autonomous"})
         
     is_agent_active = True
     
@@ -250,7 +250,7 @@ async def start_agent(duration_minutes: int = 10):
     # Start timer
     asyncio.create_task(stop_after_duration(duration_minutes))
     
-    return {"status": "agent_started", "duration": duration_minutes}
+    return {"status": "agent_started", "duration": duration_minutes, "session_id": session.id}
 
 async def stop_after_duration(minutes: int):
     await asyncio.sleep(minutes * 60)

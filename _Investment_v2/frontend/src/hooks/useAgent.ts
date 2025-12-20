@@ -156,8 +156,8 @@ export function useAgent() {
         }
 
         const data = rawData as AgentEvent;
-        // Add local timestamp
-        const eventWithTime = { ...data, timestamp: new Date().toISOString() };
+        // Preserve server timestamp when available; fallback to local timestamp
+        const eventWithTime = { ...data, timestamp: data.timestamp || new Date().toISOString() };
 
         setEvents((prev) => [...prev, eventWithTime]);
 
@@ -241,10 +241,13 @@ export function useAgent() {
     connect();
     const baseUrl = getBaseUrl();
     try {
-      await fetch(`http://${baseUrl}/agent/start?duration_minutes=${durationMinutes}`, { method: 'POST' });
+      const res = await fetch(`http://${baseUrl}/agent/start?duration_minutes=${durationMinutes}`, { method: 'POST' });
+      const data = await res.json();
+      return data.session_id;
     } catch (e) {
       console.error("Failed to start agent", e);
       setIsRunning(false);
+      return null;
     }
   }, [connect, clearStorage]);
 
@@ -280,15 +283,18 @@ export function useAgent() {
 
         // Ensure UI stays in sync with potential server activity or revert if truly failed
         setIsRunning(true);
+        return null;
       } else {
         // Success: NOW it is safe to clear storage for the new run
         clearStorage();
         toast.success("Agent run started");
+        return data.session_id;
       }
     } catch (e) {
       console.error("Failed to trigger run-once", e);
       toast.error("Failed to reach server");
       setIsRunning(false);
+      return null;
     }
   }, [connect, clearStorage]);
 

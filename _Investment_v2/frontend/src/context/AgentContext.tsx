@@ -14,9 +14,9 @@ interface AgentContextType {
         quant: { prompt: number; completion: number; total: number };
     };
     connectAndRun: (prompt: string) => void;
-    startCycle: (durationMinutes: number) => void;
+    startCycle: (durationMinutes: number) => Promise<string | null>;
     stopCycle: () => void;
-    runOnce: () => Promise<void>;
+    runOnce: () => Promise<string | null>;
     disconnect: () => void;
     activeSession: TradingSession | null;
     history: TradingSession[];

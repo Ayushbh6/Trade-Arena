@@ -8,7 +8,8 @@ export type AgentEventType =
   | "error"
   | "info"
   | "system"
-  | "status_update";
+  | "status_update"
+  | "memory";
 
 export type AgentSource = "manager" | "quant" | "system" | "user";
 

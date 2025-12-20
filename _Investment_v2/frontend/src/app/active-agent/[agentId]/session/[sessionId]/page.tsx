@@ -15,6 +15,29 @@ export default function SessionPage({ params }: { params: Promise<{ agentId: str
     const { events, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady, activeSession, loadSession } = useAgentContext();
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
+    const STATUS_STYLES: Record<string, { container: string; dot: string; text: string }> = {
+        green: {
+            container: 'bg-green-500/10 border-green-500/20',
+            dot: 'bg-green-500',
+            text: 'text-green-400',
+        },
+        emerald: {
+            container: 'bg-emerald-500/10 border-emerald-500/20',
+            dot: 'bg-emerald-500',
+            text: 'text-emerald-400',
+        },
+        blue: {
+            container: 'bg-blue-500/10 border-blue-500/20',
+            dot: 'bg-blue-500',
+            text: 'text-blue-400',
+        },
+        red: {
+            container: 'bg-red-500/10 border-red-500/20',
+            dot: 'bg-red-500',
+            text: 'text-red-400',
+        },
+    };
+
     // Load session on mount
     useEffect(() => {
         if (sessionId) {
@@ -31,6 +54,7 @@ export default function SessionPage({ params }: { params: Promise<{ agentId: str
     };
 
     const status = getStatus();
+    const statusStyle = STATUS_STYLES[status.color] ?? STATUS_STYLES.red;
 
     return (
         <main className="h-screen w-screen bg-black text-white overflow-hidden flex flex-col font-sans selection:bg-indigo-500/30 relative">
@@ -60,16 +84,18 @@ export default function SessionPage({ params }: { params: Promise<{ agentId: str
                     </div>
                 </div>
 
-                {/* Middle - Run Control */}
+                {/* Middle - Run Control - Only show if NOT historical */}
                 <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <RunControl isRunning={isRunning} onStart={startCycle} onStop={stopCycle} onRunOnce={runOnce} />
+                    {status.label !== 'Historical Session' && (
+                        <RunControl isRunning={isRunning} onStart={startCycle} onStop={stopCycle} onRunOnce={runOnce} />
+                    )}
                 </div>
 
                 <div className="flex items-center gap-3">
                     <TokenCounter managerTokens={tokenCounts.manager} quantTokens={tokenCounts.quant} />
 
-                    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border bg-${status.color}-500/10 border-${status.color}-500/20 text-${status.color}-400`}>
-                        <div className={`h-1.5 w-1.5 rounded-full bg-${status.color}-500 ${status.animate ? 'animate-pulse' : ''}`} />
+                    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border ${statusStyle.container} ${statusStyle.text}`}>
+                        <div className={`h-1.5 w-1.5 rounded-full ${statusStyle.dot} ${status.animate ? 'animate-pulse' : ''}`} />
                         <span className="text-[10px] font-medium tracking-wide uppercase">{status.label}</span>
                     </div>
                     {isRunning && <span className="text-xs text-indigo-400 font-medium flex items-center gap-1 animate-pulse"><Loader2 className="h-3 w-3 animate-spin" /> Processing</span>}
