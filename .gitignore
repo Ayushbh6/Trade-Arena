@@ -259,3 +259,7 @@ node_modules
 
 # TWS Settings
 tws_settings/
+
+
+## Specifics:
+AGENTS.md

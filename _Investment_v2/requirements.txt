@@ -13,3 +13,4 @@ websockets
 wsproto
 motor
 tiktoken
+redis

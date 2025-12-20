@@ -17,8 +17,8 @@ export default function ActiveAgentPage({ params }: { params: { agentId: string 
     const router = useRouter();
 
     // Wrappers to handle redirect
-    const handleStart = async (duration: number) => {
-        const sessionId = await startCycle(duration);
+    const handleStart = async (cadenceMinutes: number, runLimit?: number | null) => {
+        const sessionId = await startCycle(cadenceMinutes, runLimit);
         if (sessionId) {
             router.push(`/active-agent/${params.agentId}/session/${sessionId}`);
         }

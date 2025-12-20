@@ -6,21 +6,17 @@ import os
 import json
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import List
 
 # Add project root to sys.path to allow imports from agent/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent.manager import run_manager_agent, get_portfolio_state
 from database.connection import Database
-from database.models import AgentMemory
+from database.redis_client import RedisClient
 
 # Load Env
 from dotenv import load_dotenv
 load_dotenv()
-
-CYCLE_CADENCE = int(os.getenv("CYCLE_CADENCE", "10")) # Minutes
 
 # --- WEBSOCKET MANAGER ---
 class ConnectionManager:
@@ -36,11 +32,11 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
-            except:
-                pass
+            except Exception:
+                self.disconnect(connection)
 
 ws_manager = ConnectionManager()
 
@@ -49,11 +45,19 @@ ws_manager = ConnectionManager()
 async def lifespan(app: FastAPI):
     # Startup
     Database.connect()
-    # Start background loop
-    asyncio.create_task(autonomous_loop())
+    
+    # Start Redis Listeners (The "Nervous System")
+    # 1. Status Listener: Updates buttons (Start/Stop) across tabs
+    status_task = asyncio.create_task(listen_for_status_updates())
+    # 2. Event Listener: Broadcasts agent thoughts/trades/logs to UI
+    event_task = asyncio.create_task(listen_for_agent_events())
+    
     yield
     # Shutdown
+    status_task.cancel()
+    event_task.cancel()
     Database.close()
+    await RedisClient.close()
 
 app = FastAPI(title="Investment Agent V2 API", lifespan=lifespan)
 
@@ -66,130 +70,52 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- GLOBAL STATE ---
-is_agent_active = False
-is_manual_run_active = False
+# --- REDIS LISTENERS ---
 
-async def run_single_cycle(session_id: str):
+async def listen_for_status_updates():
     """
-    Executes a single cycle of the agent for a given session.
-    Returns the cycle object or raises an exception.
+    Subscribes to Redis status updates and forwards them to local WebSockets.
     """
-    print(f"--- Starting Single Cycle for Session {session_id} ---")
-            
-    # 2. Get Previous Context
-    previous_memory = await Database.get_latest_memory(session_id)
-    
-    # 3. Create Cycle Record
-    cycle_count = await Database.db.cycles.count_documents({"session_id": session_id})
-    cycle_number = cycle_count + 1
-    
-    cycle = await Database.create_cycle(session_id, cycle_number)
-    
-    # 4. Run Agent
-    events = []
-    generated_memory = None
-    
-    # Determine prompt based on context
-    prompt = "Analyze the market using your Quant Researcher's Python/Pandas capabilities. Formulate and test high-level strategies (e.g., trend following, mean reversion, or correlations) and execute trades if opportunities exist."
-    if previous_memory:
-        prompt += f" Follow up on: {previous_memory.next_steps}"
-    
-    # Run Sync Generator
-    iterator = run_manager_agent(prompt, previous_memory=previous_memory, verbose=True)
-    
-    for event in iterator:
-        event_dict = event.model_dump()
-        # Inject timestamp if missing
-        if not event_dict.get("timestamp"):
-            event_dict["timestamp"] = datetime.utcnow().isoformat()
-            
-        events.append(event_dict)
-        
-        # Broadcast live
-        await ws_manager.broadcast(event_dict)
-        
-        # Persist event immediately for granular logging
-        await Database.add_event_to_cycle(cycle.id, event_dict)
-        
-        if event.type == "memory":
-            try:
-                generated_memory = AgentMemory.model_validate_json(event.content)
-            except:
-                pass
-        # Small sleep to yield control
-        await asyncio.sleep(0.01)
-    
-    # 5. Capture Portfolio Snapshot
-    portfolio_snapshot = {}
     try:
-        port_json = get_portfolio_state()
-        port_data = json.loads(port_json)
-        # Parse "Positions": ["ETH: 0.1", ...] into {"ETH": 0.1}
-        positions_map = {}
-        for p in port_data.get("Positions", []):
-            parts = p.split(":")
-            if len(parts) == 2:
-                positions_map[parts[0].strip()] = float(parts[1].strip())
-                
-        portfolio_snapshot = {
-            "total_usdt": float(port_data.get("USDT_Free", 0)),
-            "positions": positions_map
-        }
+        pubsub = RedisClient.get_client().pubsub()
+        await pubsub.subscribe("agent:status_updates")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                data = json.loads(message["data"])
+                await ws_manager.broadcast(data)
     except Exception as e:
-        print(f"Error capturing portfolio snapshot: {e}")
-
-    # 6. Save Cycle Data
-    await Database.update_cycle(
-        cycle_id=cycle.id,
-        events=events,
-        memory=generated_memory,
-        portfolio=portfolio_snapshot
-    )
-    
-    print(f"--- Cycle {cycle_number} Complete. ---")
-    
-    # Notify frontend that the cycle is done so it can reset the "Processing" state
-    await ws_manager.broadcast({
-        "type": "system", 
-        "source": "system", 
-        "content": "Single cycle complete.",
-        "metadata": {"status": "done"}
-    })
-    
-    return cycle
-
-async def autonomous_loop():
-    global is_agent_active
-    print("Autonomous Loop Initialized. Agent is currently IDLE.")
-    
-    while True:
+        print(f"Status Listener Error: {e}")
+    finally:
         try:
-            if not is_agent_active:
-                await asyncio.sleep(5)
-                continue
+            await pubsub.unsubscribe("agent:status_updates")
+        except Exception:
+            pass
 
-            # 1. Check for Active Session
-            session = await Database.get_active_session()
-            if not session:
-                print("No active session found. Agent going to IDLE.")
-                is_agent_active = False
-                continue
-            
-            await run_single_cycle(session.id)
-            
-            print(f"Sleeping for {CYCLE_CADENCE} mins ---")
-            
-            # 7. Sleep
-            await asyncio.sleep(CYCLE_CADENCE * 60)
-            
-        except Exception as e:
-            print(f"Error in Autonomous Loop: {e}")
-            await asyncio.sleep(60) # Sleep on error
+async def listen_for_agent_events():
+    """
+    Subscribes to Redis agent events (thoughts, trades) and forwards to WebSockets.
+    This allows the Worker (separate process) to talk to the UI.
+    """
+    try:
+        pubsub = RedisClient.get_client().pubsub()
+        await pubsub.subscribe("agent:events")
+        
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                data = json.loads(message["data"])
+                await ws_manager.broadcast(data)
+    except Exception as e:
+        print(f"Event Listener Error: {e}")
+    finally:
+        try:
+            await pubsub.unsubscribe("agent:events")
+        except Exception:
+            pass
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Investment Agent V2 API is running"}
+    return {"status": "ok", "message": "Investment Agent V2 API is running (Decoupled Mode)"}
 
 @app.get("/health")
 async def health_check():
@@ -217,130 +143,72 @@ async def stop_session():
 
 @app.get("/agent/status")
 async def get_agent_status():
+    state = await RedisClient.get_agent_state()
     return {
-        "is_running": is_agent_active or is_manual_run_active,
-        "is_autonomous": is_agent_active,
-        "is_manual": is_manual_run_active,
-        "mode": "autonomous" if is_agent_active else "manual" if is_manual_run_active else "idle"
+        "is_running": state["is_running"],
+        "is_autonomous": state["mode"] == "autonomous",
+        "is_manual": state["mode"] == "manual",
+        "mode": state["mode"]
     }
 
 @app.post("/agent/start")
-async def start_agent(duration_minutes: int = 10):
-    global is_agent_active
-    
+async def start_agent(cadence_minutes: int = 10, run_limit: int | None = None):
     # Stop any existing active session first to ensure clean state
     active = await Database.get_active_session()
     if active:
         await Database.stop_session(active.id)
 
+    if run_limit is not None and run_limit < 1:
+        return {"status": "error", "message": "run_limit must be >= 1"}
+
     # Create NEW session for this loop
     session = await Database.create_session(config={"mode": "autonomous"})
         
-    is_agent_active = True
+    # Update Redis State -> Worker will pick this up!
+    await RedisClient.set_agent_state(True, "autonomous", session.id)
+    await RedisClient.set_cadence_minutes(cadence_minutes)
+    await RedisClient.reset_run_count()
+    if run_limit is None:
+        await RedisClient.clear_run_limit()
+    else:
+        await RedisClient.set_run_limit(run_limit)
+    await RedisClient.clear_next_run_time()
     
-    # Broadcast start
-    await ws_manager.broadcast({
-        "type": "status_update",
-        "content": {
-            "is_running": True,
-            "mode": "autonomous"
-        }
-    })
-    
-    # Start timer
-    asyncio.create_task(stop_after_duration(duration_minutes))
-    
-    return {"status": "agent_started", "duration": duration_minutes, "session_id": session.id}
-
-async def stop_after_duration(minutes: int):
-    await asyncio.sleep(minutes * 60)
-    global is_agent_active
-    if is_agent_active:
-        print(f"Timer expired. Stopping agent after {minutes} minutes.")
-        is_agent_active = False
-        # Broadcast stop event
-        await ws_manager.broadcast({"type": "system", "source": "system", "content": "Timer expired. Agent stopped."})
-        await ws_manager.broadcast({
-            "type": "status_update",
-            "content": {
-                "is_running": False,
-                "mode": "idle"
-            }
-        })
+    return {"status": "agent_started", "cadence_minutes": cadence_minutes, "run_limit": run_limit, "session_id": session.id}
 
 @app.post("/agent/stop")
 async def stop_agent():
-    global is_agent_active
-    is_agent_active = False
-    
-    await ws_manager.broadcast({
-        "type": "status_update",
-        "content": {
-            "is_running": False,
-            "mode": "idle"
-        }
-    })
-    
+    state = await RedisClient.get_agent_state()
+    if state.get("session_id"):
+        await Database.stop_session(state["session_id"])
+    await RedisClient.set_agent_state(False, "idle", None)
+    await RedisClient.clear_next_run_time()
+    await RedisClient.clear_run_limit()
+    await RedisClient.reset_run_count()
+    await RedisClient.clear_cadence_minutes()
     return {"status": "agent_stopped"}
 
 @app.post("/agent/run-once")
 async def run_agent_once():
     """
-    Manually triggers a single agent cycle without enabling the autonomous loop.
+    Manually triggers a single agent cycle via Redis.
+    The Worker will pick this up, run once, and reset state.
     """
-    global is_agent_active
-    global is_manual_run_active
+    # Check Redis State
+    state = await RedisClient.get_agent_state()
+    if state["is_running"]:
+         return {"status": "error", "message": "Agent is currently running. Stop it first."}
     
     # Create NEW session strictly for this single run
     # We do NOT use get_active_session here because we want isolated runs
     session = await Database.create_session(config={"mode": "manual_run"})
     
-    # Check locks
-    if is_agent_active:
-         return {"status": "error", "message": "Agent is currently running in autonomous mode. Stop it first."}
-    
-    if is_manual_run_active:
-         return {"status": "error", "message": "Agent is already executing a manual run. Please wait."}
-
-    # Set Lock
-    is_manual_run_active = True
-    
-    # Broadcast start
-    await ws_manager.broadcast({
-        "type": "status_update",
-        "content": {
-            "is_running": True,
-            "mode": "manual"
-        }
-    })
-    
-    # Define callback to release lock
-    def on_run_complete(d):
-        global is_manual_run_active
-        is_manual_run_active = False
-        print("Manual run finished. Lock released.")
-        # We need to broadcast here, but we can't await in a sync callback easily or thread-safe way without loop reference
-        # Ideally run_single_cycle should return and we handle it after await
-        
-    # Better approach: wrapper async function
-    async def run_wrapper():
-        global is_manual_run_active
-        try:
-            await run_single_cycle(session.id)
-            # Mark session as completed immediately since it's a single run
-            await Database.stop_session(session.id)
-        finally:
-            is_manual_run_active = False
-            print("Manual run finished. Lock released.")
-            await ws_manager.broadcast({
-                "type": "status_update",
-                "content": {
-                    "is_running": False,
-                    "mode": "idle"
-                }
-            })
-
-    asyncio.create_task(run_wrapper())
+    # Set State to Manual -> Worker picks this up!
+    await RedisClient.clear_run_limit()
+    await RedisClient.reset_run_count()
+    await RedisClient.clear_cadence_minutes()
+    await RedisClient.clear_next_run_time()
+    await RedisClient.set_agent_state(True, "manual", session.id)
     
     return {"status": "starting_single_run", "session_id": session.id}
 

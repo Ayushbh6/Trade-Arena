@@ -143,3 +143,22 @@ Small operational update after adding persistent storage and the autonomous cycl
     *   Preserved server timestamps instead of overwriting with local time.
     *   Added custom scrollbar styling for a premium feel.
     *   Standardized font sizes across all message types (text-sm baseline).
+
+## Update — Production-Ready Foundations (2025-12-20)
+*   **Redis as Source of Truth:**
+    *   Added Redis-backed shared state for `is_running`, `mode`, and `session_id`.
+    *   Added pub/sub channels for `agent:events` and `agent:status_updates` to keep all API nodes and UI tabs in sync.
+*   **Distributed Locking (Safe Multi-Worker):**
+    *   Implemented token-based Redis locks to ensure only the lock owner can release it.
+    *   Prevents duplicate cycles when multiple workers are running.
+*   **Worker Decoupling:**
+    *   API server is now a thin gateway that sets Redis flags.
+    *   `worker.py` is the only process that executes trading cycles.
+*   **Global Cadence Control:**
+    *   Cadence is now stored in Redis (`agent:cadence_minutes`) so all workers share the same schedule.
+    *   Ensures one cycle per cadence window even if multiple workers exist.
+*   **Run Limit (Optional):**
+    *   Added `run_limit` and `run_count` in Redis to support "run N cycles then stop".
+    *   If run limit is blank, the agent runs indefinitely until manual stop.
+*   **State Cleanup:**
+    *   Stop actions now update both Redis and Mongo so UI and DB cannot drift.

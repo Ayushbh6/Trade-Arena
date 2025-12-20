@@ -14,7 +14,7 @@ interface AgentContextType {
         quant: { prompt: number; completion: number; total: number };
     };
     connectAndRun: (prompt: string) => void;
-    startCycle: (durationMinutes: number) => Promise<string | null>;
+    startCycle: (cadenceMinutes: number, runLimit?: number | null) => Promise<string | null>;
     stopCycle: () => void;
     runOnce: () => Promise<string | null>;
     disconnect: () => void;

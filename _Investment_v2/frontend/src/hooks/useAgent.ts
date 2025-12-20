@@ -233,7 +233,7 @@ export function useAgent() {
 
   }, [connect, clearStorage]);
 
-  const startCycle = useCallback(async (durationMinutes: number) => {
+  const startCycle = useCallback(async (cadenceMinutes: number, runLimit?: number | null) => {
     // START NEW RUN: Clear old state
     clearStorage();
 
@@ -241,7 +241,11 @@ export function useAgent() {
     connect();
     const baseUrl = getBaseUrl();
     try {
-      const res = await fetch(`http://${baseUrl}/agent/start?duration_minutes=${durationMinutes}`, { method: 'POST' });
+      const params = new URLSearchParams({ cadence_minutes: String(cadenceMinutes) });
+      if (runLimit !== undefined && runLimit !== null) {
+        params.set("run_limit", String(runLimit));
+      }
+      const res = await fetch(`http://${baseUrl}/agent/start?${params.toString()}`, { method: 'POST' });
       const data = await res.json();
       return data.session_id;
     } catch (e) {
@@ -282,7 +286,7 @@ export function useAgent() {
         toast.error(data.message); // Show Red Toast
 
         // Ensure UI stays in sync with potential server activity or revert if truly failed
-        setIsRunning(true);
+        setIsRunning(false);
         return null;
       } else {
         // Success: NOW it is safe to clear storage for the new run

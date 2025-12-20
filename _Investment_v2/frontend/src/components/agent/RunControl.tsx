@@ -5,28 +5,38 @@ import { Play, Square, Timer, AlertCircle } from "lucide-react";
 
 interface RunControlProps {
     isRunning: boolean;
-    onStart: (duration: number) => void;
+    onStart: (cadenceMinutes: number, runLimit?: number | null) => void;
     onStop: () => void;
     onRunOnce: () => void;
 }
 
 export function RunControl({ isRunning, onStart, onStop, onRunOnce }: RunControlProps) {
-    const [durationStr, setDurationStr] = useState("10");
+    const [cadenceStr, setCadenceStr] = useState("10");
+    const [runLimitStr, setRunLimitStr] = useState("");
     const [error, setError] = useState<string | null>(null);
 
     const handleStart = () => {
-        const val = parseInt(durationStr);
-        if (isNaN(val) || val < 2 || durationStr.includes('.')) {
-            setError("Duration must be an integer >= 2");
+        const cadence = parseInt(cadenceStr);
+        if (isNaN(cadence) || cadence < 2 || cadenceStr.includes('.')) {
+            setError("Cadence must be an integer >= 2");
             return;
         }
+        let runLimit: number | null = null;
+        if (runLimitStr.trim() !== "") {
+            const limit = parseInt(runLimitStr);
+            if (isNaN(limit) || limit < 1 || runLimitStr.includes('.')) {
+                setError("Runs must be an integer >= 1");
+                return;
+            }
+            runLimit = limit;
+        }
         setError(null);
-        onStart(val);
+        onStart(cadence, runLimit);
     };
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value;
-        setDurationStr(val);
+        setCadenceStr(val);
 
         if (val === "") {
             setError(null);
@@ -35,7 +45,24 @@ export function RunControl({ isRunning, onStart, onStop, onRunOnce }: RunControl
 
         const num = parseInt(val);
         if (isNaN(num) || num < 2 || val.includes('.')) {
-            setError("Min 2 mins (integer)");
+            setError("Cadence min 2 mins (integer)");
+        } else {
+            setError(null);
+        }
+    };
+
+    const handleRunLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const val = e.target.value;
+        setRunLimitStr(val);
+
+        if (val === "") {
+            setError(null);
+            return;
+        }
+
+        const num = parseInt(val);
+        if (isNaN(num) || num < 1 || val.includes('.')) {
+            setError("Runs must be integer >= 1");
         } else {
             setError(null);
         }
@@ -48,7 +75,7 @@ export function RunControl({ isRunning, onStart, onStop, onRunOnce }: RunControl
                     <Timer className="h-3 w-3 text-white/40" />
                     <Input
                         type="text"
-                        value={durationStr}
+                        value={cadenceStr}
                         onChange={handleChange}
                         className="h-6 w-12 bg-transparent border-0 p-0 text-xs text-center text-white focus-visible:ring-0"
                     />
@@ -84,6 +111,16 @@ export function RunControl({ isRunning, onStart, onStop, onRunOnce }: RunControl
                             <Play className="h-3 w-3 mr-1.5 fill-current" />
                             Start Loop
                         </Button>
+                        <div className="flex items-center gap-1 bg-white/5 rounded-md px-2 h-6 border border-white/10">
+                            <Input
+                                type="text"
+                                value={runLimitStr}
+                                onChange={handleRunLimitChange}
+                                placeholder="∞"
+                                className="h-5 w-10 bg-transparent border-0 p-0 text-xs text-center text-white focus-visible:ring-0 placeholder:text-white/30"
+                            />
+                            <span className="text-[10px] text-white/40">runs</span>
+                        </div>
                     </div>
                 )}
             </div>
