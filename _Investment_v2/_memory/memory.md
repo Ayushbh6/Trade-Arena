@@ -162,3 +162,19 @@ Small operational update after adding persistent storage and the autonomous cycl
     *   If run limit is blank, the agent runs indefinitely until manual stop.
 *   **State Cleanup:**
     *   Stop actions now update both Redis and Mongo so UI and DB cannot drift.
+
+## Update — Drill-Down Navigation Architecture (2025-12-20)
+*   **Pattern:** Implemented a context-aware "Drill-Down" sidebar similar to ChatGPT/iOS.
+*   **Global View (/dashboard):**
+    *   Shows "Investment Dashboard" link.
+    *   Displays list of "Active Agents" (e.g., Quant Trader 1).
+    *   **Hides** all history to maintain a clean high-level overview.
+*   **Agent View (/active-agent/...):**
+    *   **Back Navigation:** Dashboard link transforms to include a "Back Arrow".
+    *   **Context Header:** Shows prominent Agent Name & Status.
+    *   **Focused History:** Displays ONLY the history relevant to the current agent.
+    *   **Quick Actions:** Introduced a primary "+ Start New Run" button at the top of the list.
+*   **Visual Polish:**
+    *   Moved from gradients to a solid, flat, professional aesthetic (Neutral-950).
+    *   Implemented a dedicated scroll container for the list, ensuring the sidebar header and footer remain fixed.
+    *   Verified "View vs. Truth" safety: Clicking "Start New Run" is a purely client-side navigation reset and does not create empty sessions in the backend.
