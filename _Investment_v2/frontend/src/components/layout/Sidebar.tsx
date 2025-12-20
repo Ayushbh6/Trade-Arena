@@ -141,21 +141,23 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                                                 {group.sessions.map((session: any) => {
                                                     const isAuto = session.cycle_count > 1 || session.config?.mode === 'autonomous';
                                                     return (
-                                                        <Button
+                                                        <Link
                                                             key={session.id}
-                                                            variant="ghost"
-                                                            onClick={() => {
-                                                                loadSession(session.id);
-                                                                onClose();
-                                                            }}
-                                                            className={`w-full justify-start h-8 text-[10px] text-white/30 hover:text-white/80 hover:bg-white/5 truncate group`}
+                                                            href={`/active-agent/quant-trader-1/session/${session.id}`}
+                                                            onClick={onClose}
+                                                            className="block w-full"
                                                         >
-                                                            <div className={`w-1.5 h-1.5 rounded-full mr-2 flex-none ${isAuto ? 'bg-purple-500/50' : 'bg-white/10'}`} />
-                                                            <div className="flex flex-col items-start truncate">
-                                                                <span>{new Date(session.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span>
-                                                                {isAuto && <span className="text-[9px] opacity-50">{session.cycle_count} cycles</span>}
-                                                            </div>
-                                                        </Button>
+                                                            <Button
+                                                                variant="ghost"
+                                                                className={`w-full justify-start h-8 text-[10px] text-white/30 hover:text-white/80 hover:bg-white/5 truncate group`}
+                                                            >
+                                                                <div className={`w-1.5 h-1.5 rounded-full mr-2 flex-none ${isAuto ? 'bg-purple-500/50' : 'bg-white/10'}`} />
+                                                                <div className="flex flex-col items-start truncate">
+                                                                    <span>{new Date(session.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span>
+                                                                    {isAuto && <span className="text-[9px] opacity-50">{session.cycle_count} cycles</span>}
+                                                                </div>
+                                                            </Button>
+                                                        </Link>
                                                     );
                                                 })}
                                             </div>

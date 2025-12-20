@@ -18,3 +18,4 @@ class AgentEvent(BaseModel):
     content: str
     metadata: Optional[Dict[str, Any]] = None
     usage: Optional[TokenUsage] = None
+    timestamp: Optional[str] = None

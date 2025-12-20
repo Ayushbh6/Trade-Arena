@@ -100,6 +100,10 @@ async def run_single_cycle(session_id: str):
     
     for event in iterator:
         event_dict = event.model_dump()
+        # Inject timestamp if missing
+        if not event_dict.get("timestamp"):
+            event_dict["timestamp"] = datetime.utcnow().isoformat()
+            
         events.append(event_dict)
         
         # Broadcast live
@@ -383,11 +387,17 @@ async def get_history():
 
 @app.get("/session/{session_id}")
 async def get_session_details(session_id: str):
+    # Fetch session details
+    session = await Database.db.sessions.find_one({"id": session_id})
+    if session and "_id" in session:
+        del session["_id"]
+
     cycles_cursor = Database.db.cycles.find({"session_id": session_id}).sort("cycle_number", 1)
     cycles = await cycles_cursor.to_list(length=100)
     for c in cycles:
         if "_id" in c: del c["_id"]
-    return {"cycles": cycles}
+    
+    return {"session": session, "cycles": cycles}
 
 @app.websocket("/ws/test")
 async def websocket_test(websocket: WebSocket):

@@ -310,7 +310,7 @@ export function useAgent() {
             // Use cycle time or current time or session start as fallback, but ideally sequential
             const cycleEvents = cycle.events.map((e: AgentEvent, i: number) => ({
               ...e,
-              timestamp: e.timestamp || new Date().toISOString() // Fallback if DB didn't have it
+              timestamp: e.timestamp || cycle.start_time || new Date().toISOString() // Fallback to cycle start time
             }));
             allEvents.push(...cycleEvents);
           }
@@ -318,9 +318,14 @@ export function useAgent() {
 
         setEvents(allEvents);
 
-        // Find session meta from history
-        const sessionMeta = history.find(s => s.id === sessionId);
-        if (sessionMeta) setActiveSession(sessionMeta);
+        // Set active session from response
+        if (data.session) {
+            setActiveSession(data.session);
+        } else {
+             // Fallback to history if session not in response
+            const sessionMeta = history.find(s => s.id === sessionId);
+            if (sessionMeta) setActiveSession(sessionMeta);
+        }
 
         // If loaded from history, we shouldn't be "running" usually, but just in case
         setIsRunning(false);
