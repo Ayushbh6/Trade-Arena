@@ -224,10 +224,13 @@ async def get_agent_status():
 async def start_agent(duration_minutes: int = 10):
     global is_agent_active
     
-    # Ensure active session
-    session = await Database.get_active_session()
-    if not session:
-        await Database.create_session(config={"mode": "autonomous"})
+    # Stop any existing active session first to ensure clean state
+    active = await Database.get_active_session()
+    if active:
+        await Database.stop_session(active.id)
+
+    # Create NEW session for this loop
+    await Database.create_session(config={"mode": "autonomous"})
         
     is_agent_active = True
     
@@ -284,10 +287,9 @@ async def run_agent_once():
     global is_agent_active
     global is_manual_run_active
     
-    # Ensure active session
-    session = await Database.get_active_session()
-    if not session:
-        session = await Database.create_session(config={"mode": "manual_run"})
+    # Create NEW session strictly for this single run
+    # We do NOT use get_active_session here because we want isolated runs
+    session = await Database.create_session(config={"mode": "manual_run"})
     
     # Check locks
     if is_agent_active:
@@ -321,6 +323,8 @@ async def run_agent_once():
         global is_manual_run_active
         try:
             await run_single_cycle(session.id)
+            # Mark session as completed immediately since it's a single run
+            await Database.stop_session(session.id)
         finally:
             is_manual_run_active = False
             print("Manual run finished. Lock released.")
@@ -346,13 +350,36 @@ async def get_active_session_details():
 
 @app.get("/history")
 async def get_history():
-    # Return list of sessions
-    cursor = Database.db.sessions.find().sort("start_time", -1).limit(10)
-    sessions = await cursor.to_list(length=10)
-    # Convert ObjectIds to str if needed (FastAPI handles UUIDs well usually)
+    # Return list of sessions with cycle counts
+    cursor = Database.db.sessions.find().sort("start_time", -1).limit(20)
+    sessions = await cursor.to_list(length=20)
+    
+    results = []
     for s in sessions:
         if "_id" in s: del s["_id"]
-    return sessions
+        # Count cycles for this session to enable UI grouping
+        count = await Database.db.cycles.count_documents({"session_id": s["id"]})
+        s["cycle_count"] = count
+        
+        # Get the last decision for this session
+        last_decision = "No decisions yet"
+        # Find the latest cycle that has events
+        latest_cycle_with_events = await Database.db.cycles.find_one(
+            {"session_id": s["id"], "events": {"$exists": True, "$not": {"$size": 0}}},
+            sort=[("cycle_number", -1)]
+        )
+        
+        if latest_cycle_with_events:
+            # Find the last event of type 'decision'
+            events = latest_cycle_with_events.get("events", [])
+            decisions = [e for e in events if e.get("type") == "decision"]
+            if decisions:
+                last_decision = decisions[-1].get("content", "No decisions yet")
+        
+        s["last_decision"] = last_decision
+        results.append(s)
+        
+    return results
 
 @app.get("/session/{session_id}")
 async def get_session_details(session_id: str):

@@ -1,6 +1,6 @@
 # Project Memory Log & Roadmap
 
-**Date:** December 18, 2025
+**Date:** December 20, 2025
 **Project:** Autonomous Investment Agent (MSc Data Science Thesis)
 **Current Phase:** Multi-Agent Architecture & Prototype Validation
 
@@ -67,7 +67,7 @@ We have established a robust **Manager-Worker** architecture to solve the "Conte
 
 ## 6. Current Status
 *   **System Health:** **Excellent (Green)**.
-*   **Interface:** **Live & Polished (Phase 2 Complete)**.
+*   **Interface:** **Live & Polished (Phase 2 Complete + Dashboard V2)**.
 *   **Testnet Funds:** ~10,768 USDT / 0.01 BTC Long.
 *   **Immediate Action:** Ready for Context Engineering and Long-running tests.
 
@@ -103,7 +103,14 @@ Small operational update after adding persistent storage and the autonomous cycl
 
 - **Requirements:** `motor` added to `requirements.txt` for async MongoDB access.
 
-Next suggested steps:
-- Add an optional dedicated `memories` collection (currently memory is embedded in `cycles.memory_generated`).
-- Frontend: add a Session control panel (Start/Stop), Cycle history sidebar, and P&L graph using stored snapshots.
-- Add tests for DB read/write and summariser JSON validation.
+## Update — Dashboard & Navigation Polish (2025-12-20)
+*   **Dashboard View:** Implemented a new Dashboard interface with KPI cards (Balance, PnL, Active Trades), market charts (recharts), and an Activity Stream.
+*   **Focus View:** Repurposed the previous chat interface into an "Agent Focus" view, specific to "Quant Trader 1".
+*   **Sidebar Navigation:** 
+    *   Added seamless navigation between Dashboard and Focus views.
+    *   **New Chat Experience:** Clicking "Quant Trader 1" now calls `resetSession`, clearing the ephemeral state to ensure a "New Run" screen is shown (instead of the last viewed session).
+    *   **Session History:** Past runs are grouped by date and load correctly when clicked.
+*   **Synchronization:** Implemented real-time synchronization of the "Run Once" / "Start Loop" buttons using WebSocket status updates.
+*   **Data Persistence (Fix):**
+    *   **Last Decision:** Dashboard now fetches the `last_decision` from the session history via the backend API to ensure it persists across refreshes and when no run is active.
+    *   **Robust Formatting:** Implemented strict regex extraction for decisions to prevent long text from breaking the UI layout (e.g., ensuring "HOLD", "BUY", "SELL" are shown concisely).

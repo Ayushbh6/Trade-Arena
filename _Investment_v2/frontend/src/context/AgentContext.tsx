@@ -19,6 +19,9 @@ interface AgentContextType {
     runOnce: () => Promise<void>;
     disconnect: () => void;
     activeSession: TradingSession | null;
+    history: TradingSession[];
+    loadSession: (sessionId: string) => Promise<void>;
+    resetSession: () => void;
 }
 
 const AgentContext = createContext<AgentContextType | null>(null);

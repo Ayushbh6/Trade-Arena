@@ -1,11 +1,12 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
-import { Activity, TrendingUp, TrendingDown, DollarSign, Wallet, ArrowUpRight, ArrowDownRight, Bell } from 'lucide-react';
+import { Activity, TrendingUp, TrendingDown, DollarSign, Wallet, ArrowUpRight, ArrowDownRight, Bell, Clock, Target } from 'lucide-react';
 import { AgentEvent, TradingSession } from '@/types/agent';
 
 interface DashboardProps {
     events: AgentEvent[];
     activeSession: TradingSession | null;
+    history: TradingSession[];
 }
 
 // Mock Data for Charts (Simulating "TradingView" style)
@@ -27,7 +28,7 @@ const btcData = generateData(94000, 24, 500);
 const ethData = generateData(2800, 24, 30);
 const solData = generateData(145, 24, 2);
 
-export function Dashboard({ events, activeSession }: DashboardProps) {
+export function Dashboard({ events, activeSession, history }: DashboardProps) {
     const [isMounted, setIsMounted] = useState(false);
 
     useEffect(() => {
@@ -53,6 +54,63 @@ export function Dashboard({ events, activeSession }: DashboardProps) {
 
     const activePositions = portfolioData?.Positions?.length ?? 0;
     const positionNames = portfolioData?.Positions?.map((p: string) => p.split(':')[0]).join(', ') || 'No active trades';
+
+    // Calculate Run Stats
+    const runCountToday = useMemo(() => {
+        const today = new Date().toDateString();
+        return history.filter(s => new Date(s.start_time).toDateString() === today).length;
+    }, [history]);
+
+    // Helper to extract the core decision (HOLD, BUY, SELL)
+    function formatDecisionContent(content: string) {
+        if (!content) return "Processing...";
+
+        const c = content.toUpperCase();
+
+        // 1. Strict Keyword matching first
+        if (c.includes("**HOLD**") || c.includes("DECISION: HOLD") || c.includes("RECOMMENDATION: HOLD")) return "HOLD";
+        if (c.includes("**BUY**") || c.includes("DECISION: BUY") || c.includes("RECOMMENDATION: BUY")) return "BUY";
+        if (c.includes("**SELL**") || c.includes("DECISION: SELL") || c.includes("RECOMMENDATION: SELL")) return "SELL";
+
+        // 2. Loose Keyword matching (if it contains the word largely on its own or in a critical spot)
+        // Check for "Action: HOLD" etc.
+        if (/Action:\s*HOLD/i.test(content)) return "HOLD";
+        if (/Action:\s*BUY/i.test(content)) return "BUY";
+        if (/Action:\s*SELL/i.test(content)) return "SELL";
+
+        // 3. Fallback: If the string is short enough, show it.
+        // If it's long, and we haven't found a keyword, it's likely a complex explanation.
+        // Try to find the first sentence.
+        const firstSentence = content.split('.')[0];
+        if (firstSentence.length < 20) return firstSentence;
+
+        // 4. Absolute fallback for long text without clear keywords
+        if (c.includes("HOLD")) return "HOLD";
+        if (c.includes("BUY")) return "BUY";
+        if (c.includes("SELL")) return "SELL";
+
+        return "Processing...";
+    }
+    const lastDecision = useMemo(() => {
+        // 1. Check current events first (active run or loaded past run)
+        const decisions = events.filter(e => e.type === 'decision');
+        if (decisions.length > 0) {
+            const last = decisions[decisions.length - 1];
+            return formatDecisionContent(last.content);
+        }
+
+        // 2. If no decisions in current events, check history for the last past run
+        if (history && history.length > 0) {
+            // Filter out the active session if it's in history and has no decisions yet
+            const pastRuns = history.filter(s => s.id !== activeSession?.id || (activeSession?.id && decisions.length > 0));
+            const latestPast = pastRuns[0];
+            if (latestPast && (latestPast as any).last_decision) {
+                return formatDecisionContent((latestPast as any).last_decision);
+            }
+        }
+
+        return "No decisions yet";
+    }, [events, history, activeSession]);
 
     // Filter critical events for the Activity Stream
     const criticalEvents = useMemo(() => {
@@ -86,7 +144,12 @@ export function Dashboard({ events, activeSession }: DashboardProps) {
                 <Card title="Total Balance" value={`$${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} change={`${pnl >= 0 ? '+' : ''}${pnlPct}%`} positive={pnl >= 0} icon={Wallet} />
                 <Card title="Session PnL" value={`${pnl >= 0 ? '+$' : '-$'}${Math.abs(pnl).toFixed(2)}`} change={`${pnl >= 0 ? '+' : ''}${pnlPct}%`} positive={pnl >= 0} icon={TrendingUp} />
                 <Card title="Active Positions" value={activePositions.toString()} subtext={positionNames} icon={Activity} />
-                <Card title="Agent Win Rate" value="72%" change="+1.4%" positive={true} icon={TrendingDown} />
+                <Card title="Win Rate" value="72%" change="+1.4%" positive={true} icon={TrendingDown} />
+                {/* Second Row for new KPIs if needed, or adjust grid */}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Card title="Runs Today" value={runCountToday.toString()} subtext="Full autonomous cycles" icon={Clock} />
+                <Card title="Last Decision" value={lastDecision} subtext="Latest Strategy Update" icon={Target} isTextValue={true} />
             </div>
 
             {/* Main Charts Area */}
@@ -185,7 +248,7 @@ export function Dashboard({ events, activeSession }: DashboardProps) {
 
 // --- Helper Components ---
 
-function Card({ title, value, change, subtext, positive, icon: Icon }: any) {
+function Card({ title, value, change, subtext, positive, icon: Icon, ...rest }: any) {
     return (
         <div className="bg-white/5 border border-white/10 rounded-xl p-4 flex flex-col justify-between hover:bg-white/10 transition-colors group">
             <div className="flex justify-between items-start">
@@ -195,7 +258,7 @@ function Card({ title, value, change, subtext, positive, icon: Icon }: any) {
                 </div>
             </div>
             <div className="mt-2">
-                <div className="text-2xl font-medium text-white tracking-tight">{value}</div>
+                <div className={`text-2xl font-medium text-white tracking-tight ${rest.isTextValue ? 'text-lg truncate' : ''}`} title={value}>{value}</div>
                 <div className="flex items-center gap-2 mt-1">
                     {change && (
                         <span className={`text-xs font-medium flex items-center ${positive ? 'text-emerald-400' : 'text-red-400'}`}>

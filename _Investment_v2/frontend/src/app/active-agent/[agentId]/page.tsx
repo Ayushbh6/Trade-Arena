@@ -11,7 +11,7 @@ import { AgentFeed } from "@/components/agent/AgentFeed";
 import { ArtifactViewer } from "@/components/agent/ArtifactViewer";
 
 export default function ActiveAgentPage({ params }: { params: { agentId: string } }) {
-    const { events, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady } = useAgentContext();
+    const { events, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady, activeSession } = useAgentContext();
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
     // Determine status label and color
@@ -75,13 +75,22 @@ export default function ActiveAgentPage({ params }: { params: { agentId: string 
                     <ResizablePanel defaultSize={50} minSize={30} className="bg-black border-r border-white/10 relative">
                         <div className="h-full flex flex-col">
                             <div className="flex-1 overflow-y-auto custom-scrollbar p-0">
-                                {events.length === 0 ? (
+                                {/* Show Blank/Idle Screen if no active session AND not running */}
+                                {!activeSession && !isRunning && events.length === 0 ? (
                                     <div className="h-full flex flex-col items-center justify-center text-white/30 p-8 text-center">
                                         <div className="h-20 w-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 border border-white/5">
                                             <Sparkles className="h-10 w-10 text-white/20" />
                                         </div>
-                                        <h3 className="font-medium text-lg text-white/80 mb-2">Agent Idle</h3>
-                                        <p className="text-sm max-w-xs leading-relaxed text-white/50">Awaiting your command to analyze markets and execute strategies.</p>
+                                        <h3 className="font-medium text-lg text-white/80 mb-2">New Session</h3>
+                                        <p className="text-sm max-w-xs leading-relaxed text-white/50">Start a new run or select a past session from the sidebar to view history.</p>
+                                    </div>
+                                ) : events.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-white/30 p-8 text-center">
+                                        <div className="h-20 w-20 bg-white/5 rounded-2xl flex items-center justify-center mb-6 border border-white/5">
+                                            <Sparkles className="h-10 w-10 text-white/20" />
+                                        </div>
+                                        <h3 className="font-medium text-lg text-white/80 mb-2">Agent Ready</h3>
+                                        <p className="text-sm max-w-xs leading-relaxed text-white/50">Starting execution...</p>
                                     </div>
                                 ) : (
                                     <AgentFeed events={events} />

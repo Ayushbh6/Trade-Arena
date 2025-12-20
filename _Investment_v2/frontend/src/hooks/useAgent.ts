@@ -19,6 +19,7 @@ export function useAgent() {
     quant: { prompt: 0, completion: 0, total: 0 }
   });
   const [activeSession, setActiveSession] = useState<TradingSession | null>(null);
+  const [history, setHistory] = useState<TradingSession[]>([]);
 
   // Load from storage on mount
   useEffect(() => {
@@ -102,6 +103,25 @@ export function useAgent() {
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch history helper
+  const fetchHistory = useCallback(async () => {
+    try {
+      const baseUrl = getBaseUrl();
+      const res = await fetch(`http://${baseUrl}/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch history", e);
+    }
+  }, []);
+
+  // Fetch history on mount
+  useEffect(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
   const connect = useCallback(() => {
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) return;
 
@@ -118,11 +138,19 @@ export function useAgent() {
       try {
         const rawData = JSON.parse(event.data); // Use rawData first
 
-        // Handle Status Updates first, independent of AgentEvent type strictness if needed
+        // Handle Status Updates first
         if (rawData.type === 'status_update') {
           const content = rawData.content;
           if (content && typeof content.is_running === 'boolean') {
-            setIsRunning(content.is_running);
+            const wasRunning = isRunning;
+            const nowRunning = content.is_running;
+
+            setIsRunning(nowRunning);
+
+            // If we just stopped running (finished), refresh history to show the new run
+            if (wasRunning && !nowRunning) {
+              fetchHistory();
+            }
           }
           return; // Don't add to event log
         }
@@ -176,7 +204,7 @@ export function useAgent() {
       setIsConnected(false);
       setIsRunning(false);
     };
-  }, []);
+  }, [fetchHistory, isRunning]);
 
   const connectAndRun = useCallback((prompt: string) => {
     // START NEW RUN: Clear old state
@@ -264,6 +292,47 @@ export function useAgent() {
     }
   }, [connect, clearStorage]);
 
+  const loadSession = useCallback(async (sessionId: string) => {
+    try {
+      const baseUrl = getBaseUrl();
+      const res = await fetch(`http://${baseUrl}/session/${sessionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        // data.cycles is a list of cycles, each has "events"
+        const allEvents: AgentEvent[] = [];
+
+        // Sort cycles just in case
+        const sortedCycles = data.cycles.sort((a: any, b: any) => a.cycle_number - b.cycle_number);
+
+        sortedCycles.forEach((cycle: any) => {
+          if (cycle.events && Array.isArray(cycle.events)) {
+            // Polyfill timestamp if missing to avoid "Invalid Date"
+            // Use cycle time or current time or session start as fallback, but ideally sequential
+            const cycleEvents = cycle.events.map((e: AgentEvent, i: number) => ({
+              ...e,
+              timestamp: e.timestamp || new Date().toISOString() // Fallback if DB didn't have it
+            }));
+            allEvents.push(...cycleEvents);
+          }
+        });
+
+        setEvents(allEvents);
+
+        // Find session meta from history
+        const sessionMeta = history.find(s => s.id === sessionId);
+        if (sessionMeta) setActiveSession(sessionMeta);
+
+        // If loaded from history, we shouldn't be "running" usually, but just in case
+        setIsRunning(false);
+
+        toast.success("Loaded past session");
+      }
+    } catch (e) {
+      console.error("Failed to load session", e);
+      toast.error("Failed to load session");
+    }
+  }, [history]);
+
   return {
     events,
     isConnected,
@@ -275,6 +344,9 @@ export function useAgent() {
     stopCycle,
     runOnce,
     disconnect,
-    activeSession
+    activeSession,
+    history,
+    loadSession,
+    resetSession: clearStorage
   };
 }

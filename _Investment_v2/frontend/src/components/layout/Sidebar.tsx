@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
-import { LayoutDashboard, Focus, X, ChevronDown, User, Bot, Home } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { LayoutDashboard, Focus, X, ChevronDown, User, Bot, Home, History, Clock } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useAgentContext } from '@/context/AgentContext';
 
 interface SidebarProps {
     isOpen: boolean;
@@ -11,9 +12,39 @@ interface SidebarProps {
 
 export function Sidebar({ isOpen, onClose }: SidebarProps) {
     const [isFocusOpen, setIsFocusOpen] = useState(true);
+    const [isHistoryOpen, setIsHistoryOpen] = useState(false);
     const pathname = usePathname();
+    const { history, loadSession, resetSession } = useAgentContext();
 
     const isActive = (path: string) => pathname === path || pathname?.startsWith(path + '/');
+
+    // Group history by date
+    const groupedHistory = useMemo(() => {
+        const groups: { dateLabel: string; sessions: any[] }[] = [];
+        let lastDate = '';
+
+        history.forEach((session: any) => {
+            if (!session.start_time) return;
+            const date = new Date(session.start_time);
+            const dateStr = date.toLocaleDateString();
+
+            // Determine label (Today, Yesterday, or Date)
+            let label = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+            const today = new Date();
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+
+            if (date.toDateString() === today.toDateString()) label = 'Today';
+            else if (date.toDateString() === yesterday.toDateString()) label = 'Yesterday';
+
+            if (label !== lastDate) {
+                groups.push({ dateLabel: label, sessions: [] });
+                lastDate = label;
+            }
+            groups[groups.length - 1].sessions.push(session);
+        });
+        return groups;
+    }, [history]);
 
     return (
         <div
@@ -73,6 +104,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                             <Link href="/active-agent/quant-trader-1" onClick={onClose}>
                                 <Button
                                     variant="ghost"
+                                    onClick={() => {
+                                        resetSession();
+                                        onClose();
+                                    }}
                                     className={`w-full justify-start h-10 text-sm ${isActive('/active-agent/quant-trader-1') ? 'bg-indigo-500/20 text-indigo-300' : 'text-white/40 hover:text-white/80 hover:bg-white/5'}`}
                                 >
                                     <Bot className="h-4 w-4 mr-3" />
@@ -80,9 +115,61 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                                     <span className="ml-auto text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded">LIVE</span>
                                 </Button>
                             </Link>
+
+                            {/* History Group - Nested under Quant Trader 1 */}
+                            <div className="pl-3 border-l border-white/5 ml-3 mt-1">
+                                <Button
+                                    variant="ghost"
+                                    onClick={() => setIsHistoryOpen(!isHistoryOpen)}
+                                    className={`w-full justify-between h-8 text-xs text-white/40 hover:text-white hover:bg-white/5`}
+                                >
+                                    <div className="flex items-center">
+                                        <History className="h-3 w-3 mr-2" />
+                                        Past Runs
+                                    </div>
+                                    <ChevronDown className={`h-3 w-3 transition-transform ${isHistoryOpen ? 'rotate-180' : ''}`} />
+                                </Button>
+
+                                {/* History Submenu */}
+                                {isHistoryOpen && (
+                                    <div className="pl-2 space-y-0.5 mt-1 animate-in slide-in-from-top-1 fade-in duration-200 max-h-48 overflow-y-auto custom-scrollbar">
+                                        {groupedHistory.map((group, groupIndex) => (
+                                            <div key={group.dateLabel || `group-${groupIndex}`} className="space-y-0.5">
+                                                <div className="px-2 py-1 text-[10px] text-white/30 font-semibold uppercase tracking-wider mt-2 first:mt-0">
+                                                    {group.dateLabel}
+                                                </div>
+                                                {group.sessions.map((session: any) => {
+                                                    const isAuto = session.cycle_count > 1 || session.config?.mode === 'autonomous';
+                                                    return (
+                                                        <Button
+                                                            key={session.id}
+                                                            variant="ghost"
+                                                            onClick={() => {
+                                                                loadSession(session.id);
+                                                                onClose();
+                                                            }}
+                                                            className={`w-full justify-start h-8 text-[10px] text-white/30 hover:text-white/80 hover:bg-white/5 truncate group`}
+                                                        >
+                                                            <div className={`w-1.5 h-1.5 rounded-full mr-2 flex-none ${isAuto ? 'bg-purple-500/50' : 'bg-white/10'}`} />
+                                                            <div className="flex flex-col items-start truncate">
+                                                                <span>{new Date(session.start_time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span>
+                                                                {isAuto && <span className="text-[9px] opacity-50">{session.cycle_count} cycles</span>}
+                                                            </div>
+                                                        </Button>
+                                                    );
+                                                })}
+                                            </div>
+                                        ))}
+                                        {history.length === 0 && (
+                                            <div className="px-2 py-1 text-[10px] text-white/20 italic">No runs yet</div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     )}
                 </div>
+
             </div>
 
             {/* Footer User Profile (Mock) */}

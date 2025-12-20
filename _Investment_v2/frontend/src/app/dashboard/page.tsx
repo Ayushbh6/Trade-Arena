@@ -9,7 +9,7 @@ import { RunControl } from "@/components/agent/RunControl";
 import { TokenCounter } from "@/components/agent/TokenCounter";
 
 export default function DashboardPage() {
-    const { events, activeSession, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady } = useAgentContext();
+    const { events, activeSession, isRunning, startCycle, stopCycle, runOnce, tokenCounts, isConnected, isServerReady, history } = useAgentContext();
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
     // Determine status label and color
@@ -67,7 +67,7 @@ export default function DashboardPage() {
 
             {/* Main Content */}
             <div className="flex-1 flex overflow-hidden z-0">
-                <DashboardComponent events={events} activeSession={activeSession} />
+                <DashboardComponent events={events} activeSession={activeSession} history={history} />
             </div>
         </main>
     );
