@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 # Add project root to sys.path to ensure local tools are importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from agent.schema import AgentOutput, AgentEvent, TokenUsage
+from agent.schema import AgentOutput, AgentEvent, TokenUsage, QuantReport
 from utils.openrouter import get_completion
 from termcolor import colored
 
@@ -84,8 +84,20 @@ You must respond with a valid JSON object matching this schema:
   "thought": "Your step-by-step plan for THIS specific turn. Use a numbered list with double newlines between points for readability.",
   "action": "code" | "final_answer",
   "code": "The python code to run (if action is 'code')",
-  "final_answer": "Your final conclusion (if action is 'final_answer')"
+  "final_answer": {
+      "signal": "bullish" | "bearish" | "neutral" | "uncertain",
+      "confidence": 0.0,  // Float between 0.0 and 1.0
+      "reasoning": "Detailed technical reasoning...",
+      "technical_indicators": {"RSI": 70, ...} 
+  }
 }
+If action is "final_answer", the "final_answer" field MUST be a valid JSON object matching the `QuantReport` schema below:
+
+{quant_report_schema}
+
+ENUM RULES (STRICT):
+- signal MUST be one of: "bullish", "bearish", "neutral", "uncertain".
+
 """
 
 def execute_python_code(code: str):
@@ -100,12 +112,20 @@ def execute_python_code(code: str):
     except Exception:
         return f.getvalue(), traceback.format_exc()
 
-def run_quant_agent(user_prompt: str, model="x-ai/grok-code-fast-1", verbose=True):
+def run_quant_agent(user_prompt: str, model="x-ai/grok-code-fast-1", verbose=True, audit_logger=None):
     """
     Generator that streams AgentEvent objects.
     """
+    import json
+    from agent.schema import QuantReport
+    
+    # Inject Schema into System Prompt
+    schema_json = json.dumps(QuantReport.model_json_schema(), indent=2)
+    # Use replace instead of format to avoid KeyError from other JSON braces in the prompt
+    formatted_system_prompt = SYSTEM_PROMPT.replace("{quant_report_schema}", schema_json)
+    
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": formatted_system_prompt},
         {"role": "user", "content": user_prompt}
     ]
     
@@ -124,11 +144,19 @@ def run_quant_agent(user_prompt: str, model="x-ai/grok-code-fast-1", verbose=Tru
         prompt_tokens = count_message_tokens(messages)
 
         # Get structured output from LLM
+        if audit_logger:
+            audit_logger("llm_request", {
+                "model": model,
+                "response_format": {"type": "json_object"},
+                "messages": messages
+            })
         response_text = get_completion(
             messages=messages,
             model=model,
             response_format={"type": "json_object"}
         )
+        if audit_logger:
+            audit_logger("llm_response", {"response_text": response_text})
         
         # Calculate completion tokens
         completion_tokens = count_tokens(response_text) if response_text else 0

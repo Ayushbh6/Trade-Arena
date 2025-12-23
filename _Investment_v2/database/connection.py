@@ -73,6 +73,12 @@ class Database:
             }
         )
 
+    # --- State/Event Audit Trail ---
+    @classmethod
+    async def add_state_event(cls, event: dict):
+        """Persists a single audit event for full state traceability."""
+        await cls.db.state_events.insert_one(event)
+
     @classmethod
     async def get_latest_memory(cls, session_id: str) -> AgentMemory:
         # Find the last completed cycle for this session

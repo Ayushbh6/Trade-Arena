@@ -178,3 +178,15 @@ Small operational update after adding persistent storage and the autonomous cycl
     *   Moved from gradients to a solid, flat, professional aesthetic (Neutral-950).
     *   Implemented a dedicated scroll container for the list, ensuring the sidebar header and footer remain fixed.
     *   Verified "View vs. Truth" safety: Clicking "Start New Run" is a purely client-side navigation reset and does not create empty sessions in the backend.
+
+## Update — Graph State Contracts & Audit Trail (2025-12-21)
+*   **State Graph Contracts:** Implemented structured state handoffs in the graph runner:
+    *   New `Plan` schema (objective, assets, quant_question, timeframes, constraints, expected_outputs).
+    *   PLANNING now runs a tooling pass (portfolio/market only) then a JSON-only Plan output pass.
+    *   ANALYZING consumes Plan and requires QuantReport JSON.
+    *   DECIDING consumes Plan + QuantReport and emits PortfolioDecision JSON.
+*   **Audit Trail:** Added a new `state_events` Mongo collection and instrumented micro-step logging:
+    *   LLM requests/responses, tool calls/results, parse outcomes, errors, and state transitions.
+    *   Quant LLM calls are logged via a new audit hook in `run_quant_agent`.
+*   **Standalone CLI Note:** `graph_runner` is currently a standalone CLI runner, so audit events store `run_id` only.
+    *   `session_id` / `cycle_id` are intentionally left unset until the graph runner replaces the main engine.

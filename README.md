@@ -28,7 +28,8 @@ The system is organized into the following components:
 
 - Python 3.8+
 - Node.js 18+
-- MongoDB
+- Docker & Docker Compose
+- MongoDB & Redis (Managed via Docker)
 
 ### Installation
 
@@ -40,35 +41,48 @@ The system is organized into the following components:
 
 2. Install Python dependencies:
    ```bash
-   pip install -r requirements.txt
+   pip install -r _Investment_v2/requirements.txt
    ```
 
 3. Install frontend dependencies:
    ```bash
-   cd frontend
+   cd _Investment_v2/frontend
    npm install
-   ```
-
-4. Set up environment variables:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
    ```
 
 ### Running the System
 
-1. Start the backend server:
+The system uses a decoupled architecture where the API, Worker, and Databases run independently.
+
+1. **Start Infrastructure (Databases):**
    ```bash
+   cd _Investment_v2
+   docker-compose up -d
+   ```
+
+2. **Start the Backend API:**
+   In a new terminal:
+   ```bash
+   cd _Investment_v2
    python server/main.py
    ```
 
-2. Start the frontend:
+3. **Start the Agent Worker (The Brain):**
+   In another terminal:
    ```bash
-   cd frontend
+   cd _Investment_v2
+   python server/worker.py
+   ```
+
+4. **Start the Frontend:**
+   In a final terminal:
+   ```bash
+   cd _Investment_v2/frontend
    npm run dev
    ```
 
-3. Access the dashboard at `http://localhost:3000`
+5. **Access the dashboard:**
+   Open `http://localhost:3000` in your browser.
 
 ## Configuration
 

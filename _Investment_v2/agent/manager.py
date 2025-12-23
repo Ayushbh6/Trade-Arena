@@ -10,7 +10,7 @@ from termcolor import colored
 from utils.openrouter import get_completion
 from tools.market_data import get_binance_testnet
 from agent.core import run_agent, run_quant_agent, count_message_tokens, count_tokens
-from agent.schema import AgentEvent, TokenUsage
+from agent.schema import AgentEvent, TokenUsage, PortfolioDecision
 from database.models import AgentMemory
 
 # Initialize Exchange
@@ -227,14 +227,25 @@ def run_manager_agent(initial_instruction: str, previous_memory: AgentMemory = N
                     quant_question = args['question']
                     yield AgentEvent(type="info", source="manager", content=f"Consulting Quant: {quant_question}")
                     
+                    from agent.summarizer import summarize_quant_cycle
+                    
                     quant_final_answer = "No answer received from Quant."
+                    quant_events_buffer = [] # Capture all events for the Intern
+                    
                     # Iterate through Quant's generator
                     for quant_event in run_quant_agent(quant_question, verbose=verbose):
                         yield quant_event # Stream quant events upwards
+                        quant_events_buffer.append(quant_event)
                         if quant_event.type == "decision":
                             quant_final_answer = quant_event.content
                     
-                    result = quant_final_answer
+                    # Run the Summarizer (The Intern)
+                    # We pass the full buffer so it can see thoughts, code, and errors
+                    if verbose:
+                        print(colored(f"[Manager] summarizing {len(quant_events_buffer)} quant events...", "cyan"))
+                        
+                    intern_summary = summarize_quant_cycle(quant_events_buffer)
+                    result = json.dumps(intern_summary)
                     
                 elif func_name == "execute_order":
                     result = execute_order(args['symbol'], args['side'], args['amount'])
@@ -252,57 +263,80 @@ def run_manager_agent(initial_instruction: str, previous_memory: AgentMemory = N
                 })
         
         else:
-            # No tool calls, just text response (Final Answer or Question)
-            content = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
-            if verbose:
-                print(colored(f"\n[Manager] Decision: {content}", "green", attrs=["bold"]))
-            yield AgentEvent(type="decision", source="manager", content=content, usage=usage)
-            messages.append({"role": "assistant", "content": content})
+            # No tool calls sent back, so force a Structured Decision
+            decision_schema = json.dumps(PortfolioDecision.model_json_schema(), indent=2)
+            decision_prompt = f"""
+            **DECISION TIME.**
+            You must now make a final trading decision based on your analysis.
+            Output a strict JSON object matching the schema below.
+            
+            **SCHEMA:**
+            {decision_schema}
+            
+            **IMPORTANT:** 
+            - Action must be lowercase: "buy", "sell", or "hold".
+            - Confidence must be 0.0 to 1.0.
+            - "asset" is the symbol (e.g. BTC/USDT).
+            """
+            messages.append({"role": "user", "content": decision_prompt})
+            
+            # Recalculate prompt tokens
+            prompt_tokens = count_message_tokens(messages)
+            
+            # Force JSON
+            decision_response = get_completion(
+                messages, 
+                model="google/gemini-3-flash-preview", 
+                response_format={"type": "json_object"},
+                tools=None # CRITICAL: Disable tools when forcing structured output to prevent API conflicts
+            )
+            
+            content_text = ""
+            if hasattr(decision_response, 'content') and decision_response.content:
+                content_text = decision_response.content
+            else:
+                content_text = str(decision_response)
+                
+            completion_tokens = count_tokens(content_text)
+            total_tokens = prompt_tokens + completion_tokens
+            
+            usage = TokenUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=total_tokens)
+
+            try:
+                decision_data = json.loads(content_text)
+                
+                # Handle case where LLM returns a list [decision_object]
+                if isinstance(decision_data, list):
+                    if len(decision_data) > 0:
+                        decision_data = decision_data[0]
+                    else:
+                        raise ValueError("Received empty list for decision")
+                        
+                # Validation
+                decision = PortfolioDecision(**decision_data)
+                
+                if verbose:
+                    print(colored(f"\n[Manager] Structured Decision: {decision.action} {decision.asset}", "green", attrs=["bold"]))
+                
+                yield AgentEvent(type="decision", source="manager", content=decision.model_dump_json(), usage=usage)
+                messages.append({"role": "assistant", "content": decision.model_dump_json()})
+                
+            except Exception as e:
+                yield AgentEvent(type="error", source="manager", content=f"Failed to parse decision: {e} | Raw: {content_text}", usage=usage)
+            
             break
             
-    # --- SUMMARIZATION PHASE ---
-    yield AgentEvent(type="info", source="manager", content="Generating Cycle Summary...")
+    # --- SUMMARIZATION PHASE (The Intern) ---
+    yield AgentEvent(type="info", source="manager", content="Generating Cycle Summary via Intern...")
     
-    summary_prompt = """
-    **CYCLE COMPLETE.**
-    Now, summarize your current state into a valid JSON object matching this schema:
-    {
-        "short_term_summary": "Concise narrative of what you did and saw. Use double newlines for readability if you have multiple points.",
-        "active_hypotheses": ["List of theories you are currently testing"],
-        "pending_orders": ["List of any open orders"],
-        "next_steps": "What you plan to do in the next cycle."
-    }
-    """
+    from agent.summarizer import generate_cycle_memory
     
-    messages.append({"role": "user", "content": summary_prompt})
+    # Offload memory generation to the Intern model
+    memory_data = generate_cycle_memory(messages)
     
-    # Calculate prompt tokens
-    prompt_tokens = count_message_tokens(messages)
-
-    # Force JSON mode
-    summary_response_text = get_completion(messages, model="google/gemini-3-flash-preview", response_format={"type": "json_object"})
-    
-    # Handle case where get_completion returns an object (if tools were somehow involved, though unlikely here)
-    content_text = ""
-    if hasattr(summary_response_text, 'content'):
-        content_text = summary_response_text.content
-        summary_response_text = content_text
-    else:
-        content_text = str(summary_response_text)
-        
-    completion_tokens = count_tokens(content_text)
-    total_tokens = prompt_tokens + completion_tokens
-    
-    usage = TokenUsage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=total_tokens
-    )
-        
     try:
-        memory_data = json.loads(summary_response_text)
         memory = AgentMemory(**memory_data)
-        yield AgentEvent(type="memory", source="manager", content=memory.model_dump_json(), usage=usage)
+        yield AgentEvent(type="memory", source="manager", content=memory.model_dump_json(), usage=usage) # Usage here is approximate as it's a separate call
         if verbose:
              print(colored(f"\n[Manager] Memory Generated: {memory.short_term_summary}", "magenta"))
     except Exception as e:
@@ -313,7 +347,10 @@ def run_manager(initial_instruction: str):
     Backward compatibility wrapper for sync calls.
     """
     for event in run_manager_agent(initial_instruction, verbose=True):
-        pass
+        if event.type == "decision":
+            print(colored(f"\n[FINAL DECISION] {event.content}", "green", attrs=["bold"]))
+        elif event.type == "error":
+            print(colored(f"\n[ERROR] {event.content}", "red", attrs=["bold"]))
 
 if __name__ == "__main__":
     # Use command line argument if provided, otherwise default
