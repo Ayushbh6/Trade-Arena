@@ -9,7 +9,6 @@ from agent.graph_nodes import (
     node_execute, 
     node_memorize
 )
-from agent.manager import SYSTEM_PROMPT # Reuse prompt for initial state
 
 def run_agent_graph(instruction: str, verbose: bool = True):
     """
@@ -21,7 +20,6 @@ def run_agent_graph(instruction: str, verbose: bool = True):
     state: AgentState = {
         "instruction": instruction,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": instruction}
         ],
         "market_data": None,

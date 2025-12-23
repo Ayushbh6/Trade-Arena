@@ -15,7 +15,7 @@ from tools.market_data import get_binance_testnet
 
 # Reuse existing tools from manager.py (Refactoring would be cleaner, but importing for speed)
 # Ideally we move tools to `agent/tools.py` later.
-from agent.manager import get_portfolio_state, get_market_snapshot, execute_order, SYSTEM_PROMPT, TOOLS
+from agent.manager import get_portfolio_state, get_market_snapshot, execute_order, TOOLS
 from database.connection import Database
 
 PLANNING_TOOLS = [
@@ -25,22 +25,51 @@ PLANNING_TOOLS = [
 
 PLANNING_TOOL_SYSTEM_PROMPT = """
 [PLANNING_TOOL_PROMPT]
-You are in the PLANNING (tooling) state.
-Use ONLY the available tools to gather portfolio/market context.
-Do not decide trades here; your role is to scan markets and build context for planning.
+ROLE: Portfolio Manager (Planning/Tooling).
+GOAL: Gather complete market context for planning. No decisions or analysis conclusions here.
+
+TOOL RULES:
+- Use ONLY the available tools in this call.
+- You may chain tools across multiple turns.
+- If a tool returns an error or empty data, call the tool again or fetch an alternative symbol.
+
+TOOL USAGE STRATEGY:
+1) Always fetch portfolio first.
+2) Then fetch market snapshot(s) for symbols relevant to the user’s instruction.
+3) If the user asks about a symbol not yet fetched, fetch it explicitly.
+4) If a price snapshot is stale or missing, re-fetch it.
+
+INTERPRETING TOOL OUTPUTS:
+- Portfolio: extract free USDT and any open positions.
+- Market snapshot: extract symbol, last price, 24h % change.
+- If tool output contains an error string, treat it as a failure and retry or pivot.
+
+OUTPUT:
+- Do NOT provide any plan or decision here.
+- Only tool calls and tool results are expected in this state.
 """
 
 PLAN_OUTPUT_SYSTEM_PROMPT = """
 [PLAN_OUTPUT_PROMPT]
-You are in the PLANNING (output) state.
-Produce ONLY a single JSON object that matches the Plan schema.
+ROLE: Portfolio Manager (Planning/Output).
+GOAL: Produce ONLY a single JSON object that matches the Plan schema.
 
-ENUMS / REQUIRED CHOICES:
+STRICT OUTPUT RULES:
+- Output JSON only. No prose, no markdown.
 - Use only valid symbols for assets (e.g., "BTC/USDT").
-- Ensure quant_question is explicit and actionable.
+- quant_question MUST be explicit and actionable.
+- If user asked for specific indicators/timeframes, include them in expected_outputs/timeframes.
 
 Plan JSON Schema:
 {plan_schema}
+
+SCHEMA GUIDANCE:
+- objective: one sentence intent.
+- assets: list of symbols to analyze.
+- quant_question: exact instruction for the Quant.
+- timeframes: list of timeframes (e.g., ["1h"]).
+- constraints: risk or execution notes.
+- expected_outputs: list of required indicators/outputs.
 
 Examples:
 Example 1:
@@ -52,12 +81,21 @@ Example 2:
 
 DECISION_OUTPUT_SYSTEM_PROMPT = """
 [DECISION_OUTPUT_PROMPT]
-You are in the DECIDING state.
-Produce ONLY a single JSON object that matches the PortfolioDecision schema.
-Use the provided Plan + QuantReport.
+ROLE: Portfolio Manager (Decision/Output).
+GOAL: Produce ONLY a single JSON object that matches the PortfolioDecision schema.
 
-ENUMS / REQUIRED CHOICES:
+STRICT OUTPUT RULES:
+- Output JSON only. No prose, no markdown.
 - action must be one of: "buy", "sell", "hold" (lowercase).
+- If action is "hold", quantity must be 0.0.
+- If action is "buy" or "sell", quantity must be > 0.
+
+DECISION GUIDELINES:
+- Use the Plan + QuantReport as the only sources of truth.
+- If QuantReport signal is bearish and there is no position, prefer hold.
+- If QuantReport signal is bullish and cash is available, prefer buy.
+- If signal is neutral/uncertain, prefer hold.
+- If data is missing or contradictory, choose hold with lower confidence.
 
 PortfolioDecision JSON Schema:
 {decision_schema}
@@ -86,14 +124,6 @@ def _serialize_messages(messages: List[Any]) -> List[Dict[str, Any]]:
             serialized.append({"value": str(msg)})
     return serialized
 
-def _ensure_system_prompt(messages: List[Any], tag: str, content: str) -> None:
-    for msg in messages:
-        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        text = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
-        if role == "system" and tag in (text or ""):
-            return
-    messages.append({"role": "system", "content": content})
-
 def log_state_event(state: AgentState, event_type: str, payload: Dict[str, Any]):
     event = {
         "id": str(uuid.uuid4()),
@@ -116,10 +146,25 @@ def log_state_event(state: AgentState, event_type: str, payload: Dict[str, Any])
 
     try:
         loop = asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(_write())
-    else:
         loop.create_task(_write())
+    except RuntimeError:
+        async def _write_once():
+            try:
+                # In CLI mode (no persistent loop), we must reset the client 
+                # because the previous client is bound to a closed loop.
+                if Database.client:
+                    Database.client.close()
+                    Database.client = None
+                
+                Database.connect()
+                await Database.add_state_event(event)
+            except Exception as exc:
+                if state.get("verbose"):
+                    print(f"[Audit] Failed to log state event: {exc}")
+            finally:
+                Database.close()
+
+        asyncio.run(_write_once())
 
 def node_scan(state: AgentState) -> AgentState:
     """
@@ -163,30 +208,27 @@ def node_plan(state: AgentState) -> AgentState:
         print(colored("\n--- STATE: PLANNING ---", "blue", attrs=["bold"]))
     log_state_event(state, "state_enter", {"node": "PLANNING"})
 
-    messages = state['messages']
-    _ensure_system_prompt(messages, "[PLANNING_TOOL_PROMPT]", PLANNING_TOOL_SYSTEM_PROMPT)
-    
-    # Add Market Context if it's the start
-    if len(messages) <= 2:
-        context_msg = f"""
-        ### MARKET UPDATE:
-        Portfolio: {json.dumps(state['market_data']['portfolio'])}
-        Prices: {json.dumps(state['market_data']['prices'])}
-        Note: {state['market_data'].get('note', '')}
-        
-        **INSTRUCTION:**
-        If the user asks for analysis or trends, you **MUST** call `consult_quant_researcher`. 
-        Do NOT try to guess technical indicators yourself.
-        Do NOT just say "HOLD" without analysis.
-        """
-        messages.append({"role": "user", "content": context_msg})
+    context_msg = f"""
+    ### MARKET UPDATE:
+    Portfolio: {json.dumps(state['market_data']['portfolio'])}
+    Prices: {json.dumps(state['market_data']['prices'])}
+    Note: {state['market_data'].get('note', '')}
+    """
+
+    tool_messages = [
+        {"role": "system", "content": PLANNING_TOOL_SYSTEM_PROMPT},
+        {"role": "user", "content": state["instruction"]},
+        {"role": "user", "content": context_msg}
+    ]
+
+    state_messages = state["messages"]
+    state_messages.append({"role": "user", "content": context_msg})
     
     # DEBUG: Print messages to see what LLM sees
     if state['verbose']:
         print(colored("--- MANAGER INPUT MESSAGES ---", "yellow"))
-        # print(json.dumps(messages, indent=2)) # Too verbose, just length
-        print(f"Message Count: {len(messages)}")
-        print(f"Last Message: {messages[-1]['content'][:200]}...")
+        print(f"Message Count: {len(tool_messages)}")
+        print(f"Last Message: {tool_messages[-1]['content'][:200]}...")
 
     # Tooling pass: allow only portfolio/market tools (no quant, no execution)
     max_tool_turns = 5
@@ -194,13 +236,13 @@ def node_plan(state: AgentState) -> AgentState:
         log_state_event(state, "llm_request", {
             "model": "google/gemini-3-flash-preview",
             "tools": PLANNING_TOOLS,
-            "messages": _serialize_messages(messages)
+            "messages": _serialize_messages(tool_messages)
         })
-        response = get_completion(messages, tools=PLANNING_TOOLS, model="google/gemini-3-flash-preview")
+        response = get_completion(tool_messages, tools=PLANNING_TOOLS, model="google/gemini-3-flash-preview")
         log_state_event(state, "llm_response", {"response": _serialize_llm_response(response)})
 
         if hasattr(response, 'tool_calls') and response.tool_calls:
-            messages.append(response)
+            tool_messages.append(response)
 
             for tc in response.tool_calls:
                 func_name = tc.function.name
@@ -215,7 +257,12 @@ def node_plan(state: AgentState) -> AgentState:
                 else:
                     result = f"Tool not available in PLANNING: {func_name}"
 
-                messages.append({
+                tool_messages.append({
+                    "role": "tool",
+                    "name": func_name,
+                    "content": result
+                })
+                state_messages.append({
                     "role": "tool",
                     "name": func_name,
                     "content": result
@@ -228,24 +275,27 @@ def node_plan(state: AgentState) -> AgentState:
     # Output pass: force Plan JSON (no tools)
     plan_schema = json.dumps(Plan.model_json_schema(), indent=2)
     plan_system_prompt = PLAN_OUTPUT_SYSTEM_PROMPT.replace("{plan_schema}", plan_schema)
-    _ensure_system_prompt(messages, "[PLAN_OUTPUT_PROMPT]", plan_system_prompt)
     plan_prompt = """
     **PLANNING OUTPUT REQUIRED.**
     Produce a strict JSON object that matches the Plan schema in the system prompt.
     """
-    messages.append({"role": "user", "content": plan_prompt})
+    plan_messages = [
+        {"role": "system", "content": plan_system_prompt},
+    ] + [m for m in tool_messages if m.get("role") != "system"]
+    plan_messages.append({"role": "user", "content": plan_prompt})
 
     log_state_event(state, "llm_request", {
         "model": "google/gemini-3-flash-preview",
         "response_format": {"type": "json_object"},
-        "messages": _serialize_messages(messages)
+        "messages": _serialize_messages(plan_messages)
     })
     response = get_completion(
-        messages,
+        plan_messages,
         model="google/gemini-3-flash-preview",
         response_format={"type": "json_object"},
         tools=None
     )
+    
     log_state_event(state, "llm_response", {"response": _serialize_llm_response(response)})
 
     content = response.content if hasattr(response, 'content') else str(response)
@@ -255,7 +305,7 @@ def node_plan(state: AgentState) -> AgentState:
         if isinstance(data, list) and len(data) > 0:
             data = data[0]
         state['plan'] = Plan(**data)
-        state['messages'].append({"role": "assistant", "content": content})
+        state_messages.append({"role": "assistant", "content": content})
         log_state_event(state, "plan_parsed", {"plan": state["plan"].model_dump()})
         state['current_node'] = "ANALYZING"
     except Exception as e:
@@ -275,14 +325,11 @@ def node_deciding(state: AgentState) -> AgentState:
         print(colored("\n--- STATE: DECIDING ---", "blue", attrs=["bold"]))
     log_state_event(state, "state_enter", {"node": "DECIDING"})
         
-    messages = state['messages']
-    
     plan = state.get("plan")
     quant_report = state.get("quant_report")
 
     decision_schema = json.dumps(PortfolioDecision.model_json_schema(), indent=2)
     decision_system_prompt = DECISION_OUTPUT_SYSTEM_PROMPT.replace("{decision_schema}", decision_schema)
-    _ensure_system_prompt(messages, "[DECISION_OUTPUT_PROMPT]", decision_system_prompt)
     prompt = f"""
     **DECISION TIME.**
     Use the plan and quant report to decide. Output a strict JSON object matching this schema:
@@ -299,15 +346,19 @@ def node_deciding(state: AgentState) -> AgentState:
     - Asset: Symbol string
     """
     
-    messages.append({"role": "user", "content": prompt})
+    decision_messages = [
+        {"role": "system", "content": decision_system_prompt},
+        {"role": "user", "content": state["instruction"]},
+        {"role": "user", "content": prompt}
+    ]
     
     # Call LLM with JSON mode, NO TOOLS
     log_state_event(state, "llm_request", {
         "model": "google/gemini-3-flash-preview",
         "response_format": {"type": "json_object"},
-        "messages": _serialize_messages(messages)
+        "messages": _serialize_messages(decision_messages)
     })
-    response = get_completion(messages, model="google/gemini-3-flash-preview", response_format={"type": "json_object"}, tools=None)
+    response = get_completion(decision_messages, model="google/gemini-3-flash-preview", response_format={"type": "json_object"}, tools=None)
     log_state_event(state, "llm_response", {"response": _serialize_llm_response(response)})
     
     content = response.content if hasattr(response, 'content') else str(response)

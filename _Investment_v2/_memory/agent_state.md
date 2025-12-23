@@ -80,3 +80,8 @@ Notes:
    - Validation outcomes and errors
 6. Extend the runtime (graph runner + server engine if needed) to attach `session_id`, `cycle_id`, `state`, and timestamps to every audit event.
 7. Verify logging end-to-end by running a single graph cycle and checking `state_events` in Mongo.
+
+## Status (Current)
+- Base graph infra is complete: state contracts, state-scoped prompts, quant handoff, and audit trail.
+- Graph runner is now decoupled from the legacy manager SYSTEM_PROMPT.
+- Remaining work is iterative improvement: per-state prompt tuning, retry/error handling per state, and production hardening.

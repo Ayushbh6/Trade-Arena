@@ -190,3 +190,11 @@ Small operational update after adding persistent storage and the autonomous cycl
     *   Quant LLM calls are logged via a new audit hook in `run_quant_agent`.
 *   **Standalone CLI Note:** `graph_runner` is currently a standalone CLI runner, so audit events store `run_id` only.
     *   `session_id` / `cycle_id` are intentionally left unset until the graph runner replaces the main engine.
+
+## Update — State-Scoped Prompts & Production Hardening (2025-12-21)
+*   **Decoupled Prompts:** Graph runner no longer inherits the legacy manager `SYSTEM_PROMPT`.
+*   **State-Scoped System Prompts:**
+    *   PLANNING tooling: production-grade tool usage guidance and chaining rules.
+    *   PLANNING output: strict Plan schema rules with examples.
+    *   DECIDING output: strict PortfolioDecision rules with decision heuristics.
+*   **Status:** Core graph infrastructure is now in place; future work focuses on iterative improvements (prompt tuning per state, retry logic, and production hardening).
